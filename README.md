@@ -1,37 +1,37 @@
-# Binance Futures Orderflow Screener 🚀
+# Binance Futures Orderflow Screener
 
 A professional-grade real-time trading platform for monitoring Binance USD-M futures contracts with advanced orderflow analysis capabilities. Built in Rust for maximum performance and reliability.
 
 ![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)
 ![SQLite](https://img.shields.io/badge/sqlite-%2307405e.svg?style=for-the-badge&logo=sqlite&logoColor=white)
 
-## 🎯 Features
+## Features
 
-### 📊 Big Orderflow Screener
+### Big Orderflow Screener
 - Real-time monitoring of all USD-M futures contracts
 - Detects large orders exceeding 0.5% of daily average volume
 - Visual alerts with color coding for buy/sell orders
 - Advanced filtering and sorting capabilities
 
-### ⚖️ Order Imbalance Tracker
+### Order Imbalance Tracker
 - Real-time bid/ask imbalance monitoring across all tickers
 - Visual representation of buyer/seller pressure
 - Historical imbalance trends and patterns
 - Multiple display modes (table, grid, chart)
 
-### 📈 Footprint Chart Analysis
+### Footprint Chart Analysis
 - 1-minute base candlesticks with adjustable time bins
 - Volume-at-price footprint display within each candle
 - Buy/sell volume segregation with visual bars
 - Dynamic reaggregation when timeframe changes
 
-### 💥 Liquidation Monitor
+### Liquidation Monitor
 - Real-time tracking of forced liquidation orders
 - Size and direction of liquidations
 - Multi-ticker liquidation flow analysis
 - Flash alerts for significant liquidations
 
-## 🏗️ Architecture
+## Architecture
 
 - **Multi-threaded**: Tokio async runtime for optimal performance
 - **Real-time GUI**: 60fps rendering with egui framework
@@ -39,7 +39,7 @@ A professional-grade real-time trading platform for monitoring Binance USD-M fut
 - **WebSocket**: Direct connection to Binance futures streams
 - **Modular**: Clean separation of concerns across modules
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -75,7 +75,7 @@ make run
 make dev
 ```
 
-## 📋 Usage
+## Usage
 
 ### Configuration
 
@@ -109,7 +109,7 @@ max_displayed_rows = 100
 - `Ctrl+R`: Refresh data
 - `Ctrl+Q`: Quit application
 
-## 🛠️ Development
+## Development
 
 ### Build Commands
 
@@ -134,7 +134,7 @@ src/
 └── utils/               # Utilities and helpers
 ```
 
-## 🐳 Docker Deployment
+## Docker Deployment
 
 ### Docker Compose (Recommended)
 
@@ -163,7 +163,7 @@ docker run -d \
   binance-screener
 ```
 
-## 🔧 System Service (Linux)
+## System Service (Linux)
 
 ```bash
 # Install as systemd service
@@ -176,7 +176,7 @@ sudo systemctl start binance-screener
 sudo journalctl -u binance-screener -f
 ```
 
-## 📊 Monitoring
+## Monitoring
 
 ### Health Checks
 
@@ -197,7 +197,7 @@ sudo journalctl -u binance-screener -f
 - Data throughput: 1000+ trades/second
 - GUI rendering: 60fps
 
-## 💾 Data Management
+## Data Management
 
 ### Backup
 
@@ -219,7 +219,7 @@ sqlite3 data.db "SELECT COUNT(*) FROM raw_trades;"
 sqlite3 data.db "DELETE FROM raw_trades WHERE timestamp < $(date -d '30 days ago' +%s)000;"
 ```
 
-## 🔧 Configuration Reference
+## Configuration Reference
 
 ### Binance Settings
 - `websocket_base_url`: WebSocket endpoint
@@ -236,7 +236,7 @@ sqlite3 data.db "DELETE FROM raw_trades WHERE timestamp < $(date -d '30 days ago
 - `max_displayed_rows`: Maximum table rows
 - `color_scheme`: Theme colors
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -269,7 +269,7 @@ make clean
 - Error logs: `logs/error.log`
 - WebSocket logs: `logs/websocket.log`
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/new-feature`
@@ -284,22 +284,20 @@ make clean
 - Add documentation for public APIs
 - Write tests for new features
 
-## 📝 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## ⚠️ Disclaimer
+## Disclaimer
 
 This software is for educational and research purposes only. Trading cryptocurrencies involves substantial risk of loss. The authors are not responsible for any financial losses incurred through the use of this software.
 
-## 🙋‍♂️ Support
+## Support
 
-- 📧 Email: support@example.com
-- 💬 Discord: [Join our server](https://discord.gg/example)
-- 📖 Documentation: [Wiki](https://github.com/example/binance-screener/wiki)
-- 🐛 Issues: [GitHub Issues](https://github.com/example/binance-screener/issues)
+- 📧 Email: mecoserra2008@gmail.com
+- 📖 Linkedin: [Link](https://www.linkedin.com/in/americoserra/)
 
-## 🏆 Acknowledgments
+## Acknowledgments
 
 - [Binance API](https://binance-docs.github.io/apidocs/futures/en/) for market data
 - [egui](https://github.com/emilk/egui) for the GUI framework
