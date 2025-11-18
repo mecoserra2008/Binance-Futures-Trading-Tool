@@ -1,0 +1,46 @@
+# Binance Futures Orderflow Screener Configuration
+
+[binance]
+websocket_base_url = "wss://fstream.binance.com"
+api_base_url = "https://fapi.binance.com"
+max_reconnect_attempts = 10
+reconnect_delay_ms = 500
+symbols = [
+    "BTCUSDT",
+    "ETHUSDT", 
+    "ADAUSDT",
+    "DOTUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "BCHUSDT",
+    "XLMUSDT",
+    "EOSUSDT",
+    "TRXUSDT",
+    "AVAXUSDT",
+    "SOLUSDT",
+    "MATICUSDT",
+    "ATOMUSDT",
+    "FILUSDT"
+]
+
+[database]
+path = "data.db"
+max_connections = 10
+backup_interval_hours = 24
+
+[analysis]
+volume_threshold_percentage = 0.5
+imbalance_window_seconds = 60
+footprint_timeframes = ["1m", "5m", "15m"]
+liquidation_size_threshold = 100000.0
+
+[gui]
+refresh_rate_ms = 16
+max_displayed_rows = 100
+
+[gui.color_scheme]
+background = "#1e1e1e"
+text = "#e0e0e0"
+buy_color = "#00ff88"
+sell_color = "#ff4444"
+neutral_color = "#ffaa00"
