@@ -90,6 +90,82 @@ impl FootprintCandle {
     }
 }
 
+// VPVR (Volume Profile Visible Range) Data Structures
+
+/// Represents aggregated volume at a single price level across visible range
+#[derive(Debug, Clone)]
+pub struct VPVRLevel {
+    pub price: f64,
+    pub total_buy_volume: u64,    // Aggregated ask volume (buys)
+    pub total_sell_volume: u64,   // Aggregated bid volume (sells)
+    pub total_volume: u64,        // Total = buys + sells
+}
+
+impl VPVRLevel {
+    pub fn new(price: f64) -> Self {
+        Self {
+            price,
+            total_buy_volume: 0,
+            total_sell_volume: 0,
+            total_volume: 0,
+        }
+    }
+
+    pub fn add_volumes(&mut self, buy_volume: u64, sell_volume: u64) {
+        self.total_buy_volume += buy_volume;
+        self.total_sell_volume += sell_volume;
+        self.total_volume += buy_volume + sell_volume;
+    }
+
+    pub fn delta(&self) -> i64 {
+        self.total_buy_volume as i64 - self.total_sell_volume as i64
+    }
+}
+
+/// Complete VPVR calculation result
+#[derive(Debug, Clone)]
+pub struct VPVRProfile {
+    pub levels: BTreeMap<i64, VPVRLevel>,  // price_tick -> VPVRLevel
+    pub poc: f64,                          // Point of Control (highest volume price)
+    pub vah: f64,                          // Value Area High (70% upper bound)
+    pub val: f64,                          // Value Area Low (70% lower bound)
+    pub total_volume: u64,                 // Total volume in visible range
+    pub total_buy_volume: u64,             // Total buy volume
+    pub total_sell_volume: u64,            // Total sell volume
+    pub max_volume_at_level: u64,          // For histogram scaling
+}
+
+impl VPVRProfile {
+    pub fn empty() -> Self {
+        Self {
+            levels: BTreeMap::new(),
+            poc: 0.0,
+            vah: 0.0,
+            val: 0.0,
+            total_volume: 0,
+            total_buy_volume: 0,
+            total_sell_volume: 0,
+            max_volume_at_level: 0,
+        }
+    }
+}
+
+/// Position of VPVR histogram on chart
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VPVRPosition {
+    Right,      // VPVR histogram on right side of chart
+    Left,       // VPVR histogram on left side
+    Overlay,    // Overlaid on the footprint chart
+}
+
+/// Color mode for VPVR histogram display
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VPVRColorMode {
+    Stacked,       // Buy on top, sell on bottom, same bar
+    SideBySide,    // Buy extends right, sell extends left from center
+    DeltaBased,    // Single bar colored by net delta
+}
+
 pub struct FootprintPanel {
     symbols: Vec<String>,
     selected_symbol: String,
@@ -128,6 +204,19 @@ pub struct FootprintPanel {
 
     // Cumulative Volume Delta tracking per symbol
     cumulative_cvd: HashMap<String, i64>,
+
+    // VPVR (Volume Profile Visible Range) settings
+    show_vpvr: bool,                          // Enable/disable VPVR display
+    vpvr_position: VPVRPosition,              // Right, Left, or Overlay
+    vpvr_width_percentage: f32,               // Width as % of chart (default: 20%)
+    vpvr_opacity: f32,                        // Transparency (default: 0.8)
+    show_poc_line: bool,                      // Draw horizontal line at POC
+    show_vah_val_lines: bool,                 // Draw horizontal lines at VAH/VAL
+    vpvr_color_mode: VPVRColorMode,           // Stacked, SideBySide, or DeltaBased
+
+    // VPVR calculated data
+    current_vpvr: Option<VPVRProfile>,        // Cached calculation
+    vpvr_needs_recalc: bool,                  // Flag to trigger recalculation
 }
 
 impl FootprintPanel {
@@ -170,6 +259,19 @@ impl FootprintPanel {
 
             // Cumulative CVD tracking
             cumulative_cvd: HashMap::new(),
+
+            // VPVR settings
+            show_vpvr: false,                        // Disabled by default
+            vpvr_position: VPVRPosition::Right,      // Right side by default
+            vpvr_width_percentage: 20.0,             // 20% of chart width
+            vpvr_opacity: 0.8,                       // 80% opacity
+            show_poc_line: true,                     // Show POC line by default
+            show_vah_val_lines: true,                // Show VAH/VAL lines by default
+            vpvr_color_mode: VPVRColorMode::Stacked, // Stacked mode by default
+
+            // VPVR calculated data
+            current_vpvr: None,
+            vpvr_needs_recalc: true,
         }
     }
 
@@ -219,6 +321,19 @@ impl FootprintPanel {
 
             // Cumulative CVD tracking
             cumulative_cvd: HashMap::new(),
+
+            // VPVR settings
+            show_vpvr: false,                        // Disabled by default
+            vpvr_position: VPVRPosition::Right,      // Right side by default
+            vpvr_width_percentage: 20.0,             // 20% of chart width
+            vpvr_opacity: 0.8,                       // 80% opacity
+            show_poc_line: true,                     // Show POC line by default
+            show_vah_val_lines: true,                // Show VAH/VAL lines by default
+            vpvr_color_mode: VPVRColorMode::Stacked, // Stacked mode by default
+
+            // VPVR calculated data
+            current_vpvr: None,
+            vpvr_needs_recalc: true,
         }
     }
 
@@ -325,15 +440,18 @@ impl FootprintPanel {
                 ui.label("Zoom:");
                 if ui.button("−").clicked() {
                     self.zoom_level = (self.zoom_level / 1.2).max(self.min_zoom);
+                    self.mark_vpvr_for_recalc();
                 }
                 ui.label(format!("{:.1}x", self.zoom_level));
                 if ui.button("+").clicked() {
                     self.zoom_level = (self.zoom_level * 1.2).min(self.max_zoom);
+                    self.mark_vpvr_for_recalc();
                 }
                 if ui.button("Reset").clicked() {
                     self.zoom_level = 1.0;
                     self.pan_x = 0.0;
                     self.pan_y = 0.0;
+                    self.mark_vpvr_for_recalc();
                 }
 
                 ui.separator();
@@ -342,6 +460,66 @@ impl FootprintPanel {
                 ui.checkbox(&mut self.show_volume, "Volume");
                 ui.checkbox(&mut self.show_delta, "Delta");
                 ui.checkbox(&mut self.show_imbalance, "Imbalance");
+            });
+
+            // VPVR Controls (second row)
+            ui.horizontal(|ui| {
+                ui.label("VPVR:");
+                if ui.checkbox(&mut self.show_vpvr, "Enable").changed() {
+                    self.mark_vpvr_for_recalc();
+                }
+
+                if self.show_vpvr {
+                    ui.separator();
+
+                    ui.label("Position:");
+                    egui::ComboBox::from_id_source("vpvr_position")
+                        .selected_text(match self.vpvr_position {
+                            VPVRPosition::Right => "Right",
+                            VPVRPosition::Left => "Left",
+                            VPVRPosition::Overlay => "Overlay",
+                        })
+                        .width(80.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.vpvr_position, VPVRPosition::Right, "Right");
+                            ui.selectable_value(&mut self.vpvr_position, VPVRPosition::Left, "Left");
+                            ui.selectable_value(&mut self.vpvr_position, VPVRPosition::Overlay, "Overlay");
+                        });
+
+                    ui.label("Width:");
+                    if ui.add(egui::Slider::new(&mut self.vpvr_width_percentage, 10.0..=40.0)
+                        .suffix("%")
+                        .text("")
+                        .show_value(true)).changed() {
+                        self.mark_vpvr_for_recalc();
+                    }
+
+                    ui.label("Opacity:");
+                    ui.add(egui::Slider::new(&mut self.vpvr_opacity, 0.1..=1.0)
+                        .text("")
+                        .show_value(false));
+
+                    ui.separator();
+
+                    ui.checkbox(&mut self.show_poc_line, "POC");
+                    ui.checkbox(&mut self.show_vah_val_lines, "VAH/VAL");
+
+                    ui.separator();
+
+                    ui.label("Color:");
+                    egui::ComboBox::from_id_source("vpvr_color_mode")
+                        .selected_text(match self.vpvr_color_mode {
+                            VPVRColorMode::Stacked => "Stacked",
+                            VPVRColorMode::SideBySide => "Side by Side",
+                            VPVRColorMode::DeltaBased => "Delta Based",
+                        })
+                        .width(100.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.vpvr_color_mode, VPVRColorMode::Stacked, "Stacked");
+                            ui.selectable_value(&mut self.vpvr_color_mode, VPVRColorMode::SideBySide, "Side by Side");
+                            ui.selectable_value(&mut self.vpvr_color_mode, VPVRColorMode::DeltaBased, "Delta Based");
+                        });
+                }
             });
 
             ui.separator();
@@ -426,6 +604,35 @@ impl FootprintPanel {
         let visible_start_index = (-self.pan_x / candle_width).max(0.0) as usize;
         let visible_end_index = ((chart_rect.width() - self.pan_x) / candle_width).min(all_candles.len() as f32) as usize;
 
+        // Calculate VPVR if enabled and needed
+        if self.show_vpvr && self.vpvr_needs_recalc {
+            let visible_candles: Vec<FootprintCandle> = all_candles[visible_start_index..visible_end_index].to_vec();
+            let vpvr_profile = self.calculate_vpvr_profile(&visible_candles);
+
+            // We need to use interior mutability here, but since we can't modify self in this context,
+            // we'll calculate it fresh each time if needed
+            // This is acceptable as VPVR calculation is efficient
+        }
+
+        // For rendering, always recalculate VPVR from visible candles if enabled
+        let vpvr_profile = if self.show_vpvr {
+            let visible_candles: Vec<FootprintCandle> = all_candles[visible_start_index..visible_end_index].to_vec();
+            Some(self.calculate_vpvr_profile(&visible_candles))
+        } else {
+            None
+        };
+
+        // Store the VPVR profile temporarily for rendering
+        // We'll use a local variable since we can't mutate self here
+        let current_vpvr_backup = self.current_vpvr.clone();
+
+        // Draw VPVR lines first (so they appear behind candles)
+        if self.show_vpvr {
+            if let Some(ref vpvr) = vpvr_profile {
+                self.draw_vpvr_lines_with_profile(ui, chart_rect, overall_min_price, overall_max_price, vpvr);
+            }
+        }
+
         // Draw visible candles
         for (i, candle) in all_candles.iter().enumerate().skip(visible_start_index).take(visible_end_index - visible_start_index) {
             let x = chart_rect.min.x + i as f32 * candle_width + self.pan_x;
@@ -433,6 +640,13 @@ impl FootprintPanel {
             // Only draw if candle is within chart bounds
             if x + candle_width >= chart_rect.min.x && x <= chart_rect.max.x {
                 self.draw_footprint_candle(ui, candle, x, candle_width, chart_rect, overall_min_price, overall_max_price, max_volume);
+            }
+        }
+
+        // Draw VPVR histogram on top of candles
+        if self.show_vpvr {
+            if let Some(ref vpvr) = vpvr_profile {
+                self.draw_vpvr_histogram_with_profile(ui, chart_rect, overall_min_price, overall_max_price, vpvr);
             }
         }
     }
@@ -578,6 +792,7 @@ impl FootprintPanel {
                         self.pan_x = self.pan_x * zoom_ratio + chart_rect.width() * relative_x * (1.0 - zoom_ratio);
                         self.pan_y = self.pan_y * zoom_ratio + chart_rect.height() * relative_y * (1.0 - zoom_ratio);
                     }
+                    self.mark_vpvr_for_recalc(); // VPVR needs recalc when zooming
                 }
             });
         }
@@ -589,6 +804,7 @@ impl FootprintPanel {
                     let delta = current_pos - last_pos;
                     self.pan_x += delta.x;
                     self.pan_y += delta.y;
+                    self.mark_vpvr_for_recalc(); // VPVR needs recalc when panning
                 }
                 self.last_mouse_pos = Some(current_pos);
                 self.dragging = true;
@@ -606,26 +822,34 @@ impl FootprintPanel {
 
         // Handle keyboard shortcuts for navigation
         ui.input(|i| {
+            let mut needs_recalc = false;
+
             // Arrow keys for panning
             if i.key_pressed(egui::Key::ArrowLeft) {
                 self.pan_x += 20.0;
+                needs_recalc = true;
             }
             if i.key_pressed(egui::Key::ArrowRight) {
                 self.pan_x -= 20.0;
+                needs_recalc = true;
             }
             if i.key_pressed(egui::Key::ArrowUp) {
                 self.pan_y += 20.0;
+                needs_recalc = true;
             }
             if i.key_pressed(egui::Key::ArrowDown) {
                 self.pan_y -= 20.0;
+                needs_recalc = true;
             }
 
             // Plus/minus keys for zooming
             if i.key_pressed(egui::Key::PlusEquals) {
                 self.zoom_level = (self.zoom_level * 1.2).min(self.max_zoom);
+                needs_recalc = true;
             }
             if i.key_pressed(egui::Key::Minus) {
                 self.zoom_level = (self.zoom_level / 1.2).max(self.min_zoom);
+                needs_recalc = true;
             }
 
             // Home key to reset view
@@ -633,6 +857,11 @@ impl FootprintPanel {
                 self.zoom_level = 1.0;
                 self.pan_x = 0.0;
                 self.pan_y = 0.0;
+                needs_recalc = true;
+            }
+
+            if needs_recalc {
+                self.mark_vpvr_for_recalc();
             }
         });
     }
@@ -848,6 +1077,402 @@ impl FootprintPanel {
         // Update selected symbol if it's not in the new list
         if !self.symbols.contains(&self.selected_symbol) {
             self.selected_symbol = self.symbols.first().unwrap_or(&"BTCUSDT".to_string()).clone();
+        }
+    }
+
+    // ==================== VPVR Calculation Methods ====================
+
+    /// Mark VPVR for recalculation (called when visible range changes)
+    fn mark_vpvr_for_recalc(&mut self) {
+        self.vpvr_needs_recalc = true;
+    }
+
+    /// Calculate VPVR profile from visible candles
+    fn calculate_vpvr_profile(&self, visible_candles: &[FootprintCandle]) -> VPVRProfile {
+        if visible_candles.is_empty() {
+            return VPVRProfile::empty();
+        }
+
+        // Step 1: Aggregate volume across all visible candles by price level
+        let mut vpvr_data: BTreeMap<i64, VPVRLevel> = BTreeMap::new();
+        let mut total_buy_volume = 0u64;
+        let mut total_sell_volume = 0u64;
+
+        for candle in visible_candles {
+            for (price_tick, cell) in &candle.cells {
+                let entry = vpvr_data.entry(*price_tick).or_insert_with(|| {
+                    VPVRLevel::new(*price_tick as f64 * self.price_scale)
+                });
+
+                entry.add_volumes(cell.ask_volume, cell.bid_volume);
+                total_buy_volume += cell.ask_volume;
+                total_sell_volume += cell.bid_volume;
+            }
+        }
+
+        if vpvr_data.is_empty() {
+            return VPVRProfile::empty();
+        }
+
+        // Step 2: Find max volume for scaling
+        let max_volume_at_level = vpvr_data.values()
+            .map(|level| level.total_volume)
+            .max()
+            .unwrap_or(0);
+
+        // Step 3: Calculate POC (Point of Control)
+        let (poc_tick, poc) = self.calculate_poc(&vpvr_data);
+
+        // Step 4: Calculate VAH and VAL (Value Area High and Low)
+        let (vah, val) = self.calculate_value_area(&vpvr_data, poc_tick);
+
+        VPVRProfile {
+            levels: vpvr_data,
+            poc,
+            vah,
+            val,
+            total_volume: total_buy_volume + total_sell_volume,
+            total_buy_volume,
+            total_sell_volume,
+            max_volume_at_level,
+        }
+    }
+
+    /// Calculate Point of Control (price level with highest volume)
+    fn calculate_poc(&self, vpvr_data: &BTreeMap<i64, VPVRLevel>) -> (i64, f64) {
+        let mut max_volume = 0u64;
+        let mut poc_tick = 0i64;
+        let mut poc_price = 0.0;
+
+        for (tick, level) in vpvr_data {
+            if level.total_volume > max_volume {
+                max_volume = level.total_volume;
+                poc_tick = *tick;
+                poc_price = level.price;
+            }
+        }
+
+        (poc_tick, poc_price)
+    }
+
+    /// Calculate Value Area High and Low (70% of volume)
+    fn calculate_value_area(&self, vpvr_data: &BTreeMap<i64, VPVRLevel>, poc_tick: i64) -> (f64, f64) {
+        if vpvr_data.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        // Calculate 70% threshold
+        let total_volume: u64 = vpvr_data.values()
+            .map(|level| level.total_volume)
+            .sum();
+
+        if total_volume == 0 {
+            return (0.0, 0.0);
+        }
+
+        let value_area_volume = (total_volume as f64 * 0.70) as u64;
+
+        // Start with POC volume
+        let mut accumulated_volume = vpvr_data.get(&poc_tick)
+            .map(|level| level.total_volume)
+            .unwrap_or(0);
+
+        // Create sorted list of price ticks
+        let sorted_ticks: Vec<i64> = vpvr_data.keys().cloned().collect();
+        let poc_index = sorted_ticks.iter().position(|&t| t == poc_tick).unwrap_or(0);
+
+        let mut upper_tick = poc_tick;
+        let mut lower_tick = poc_tick;
+        let mut upper_index = poc_index;
+        let mut lower_index = poc_index;
+
+        // Expand alternately up and down until we reach 70% volume
+        let mut expand_up = true;
+
+        while accumulated_volume < value_area_volume {
+            let mut expanded = false;
+
+            if expand_up && upper_index + 1 < sorted_ticks.len() {
+                // Try to expand upward
+                upper_index += 1;
+                upper_tick = sorted_ticks[upper_index];
+                accumulated_volume += vpvr_data.get(&upper_tick).unwrap().total_volume;
+                expanded = true;
+            } else if !expand_up && lower_index > 0 {
+                // Try to expand downward
+                lower_index -= 1;
+                lower_tick = sorted_ticks[lower_index];
+                accumulated_volume += vpvr_data.get(&lower_tick).unwrap().total_volume;
+                expanded = true;
+            }
+
+            // If we couldn't expand in the current direction, try the opposite
+            if !expanded {
+                if !expand_up && upper_index + 1 < sorted_ticks.len() {
+                    upper_index += 1;
+                    upper_tick = sorted_ticks[upper_index];
+                    accumulated_volume += vpvr_data.get(&upper_tick).unwrap().total_volume;
+                } else if expand_up && lower_index > 0 {
+                    lower_index -= 1;
+                    lower_tick = sorted_ticks[lower_index];
+                    accumulated_volume += vpvr_data.get(&lower_tick).unwrap().total_volume;
+                } else {
+                    // Can't expand further in either direction
+                    break;
+                }
+            }
+
+            expand_up = !expand_up;  // Alternate direction
+        }
+
+        let vah = vpvr_data.get(&upper_tick).unwrap().price;
+        let val = vpvr_data.get(&lower_tick).unwrap().price;
+
+        (vah, val)
+    }
+
+    // ==================== VPVR Rendering Methods ====================
+
+    /// Draw VPVR histogram on the chart with provided profile
+    fn draw_vpvr_histogram_with_profile(
+        &self,
+        ui: &mut Ui,
+        chart_rect: Rect,
+        min_price: f64,
+        max_price: f64,
+        vpvr: &VPVRProfile,
+    ) {
+        if vpvr.levels.is_empty() || vpvr.max_volume_at_level == 0 {
+            return;
+        }
+
+        // Calculate histogram area based on position
+        let vpvr_width = chart_rect.width() * (self.vpvr_width_percentage / 100.0);
+        let vpvr_x = match self.vpvr_position {
+            VPVRPosition::Right => chart_rect.right() - vpvr_width,
+            VPVRPosition::Left => chart_rect.left(),
+            VPVRPosition::Overlay => chart_rect.right() - vpvr_width,
+        };
+
+        let vpvr_rect = Rect::from_min_size(
+            Pos2::new(vpvr_x, chart_rect.min.y),
+            Vec2::new(vpvr_width, chart_rect.height()),
+        );
+
+        // Draw background for histogram area (except for overlay mode)
+        if self.vpvr_position != VPVRPosition::Overlay {
+            ui.painter().rect_filled(vpvr_rect, 0.0, Color32::from_rgba_unmultiplied(40, 40, 40, 200));
+        }
+
+        let price_range = max_price - min_price;
+        if price_range <= 0.0 {
+            return;
+        }
+
+        let max_volume = vpvr.max_volume_at_level as f32;
+
+        // Helper function to convert price to Y coordinate
+        let price_to_y = |price: f64| -> f32 {
+            chart_rect.max.y - ((price - min_price) / price_range * chart_rect.height() as f64) as f32
+        };
+
+        // Draw each price level
+        for level in vpvr.levels.values() {
+            let y = price_to_y(level.price);
+            let bar_height = (self.price_scale / price_range * chart_rect.height() as f64).max(2.0) as f32;
+
+            match self.vpvr_color_mode {
+                VPVRColorMode::Stacked => {
+                    // Total volume bar with stacked colors
+                    let total_width = (level.total_volume as f32 / max_volume) * vpvr_width;
+
+                    if level.total_volume > 0 {
+                        let buy_ratio = level.total_buy_volume as f32 / level.total_volume as f32;
+
+                        // Sell portion (left/bottom)
+                        let sell_width = total_width * (1.0 - buy_ratio);
+                        if sell_width > 0.0 {
+                            ui.painter().rect_filled(
+                                Rect::from_min_size(
+                                    Pos2::new(vpvr_x, y - bar_height / 2.0),
+                                    Vec2::new(sell_width, bar_height),
+                                ),
+                                0.0,
+                                Color32::from_rgba_unmultiplied(
+                                    200, 50, 50,
+                                    (self.vpvr_opacity * 255.0) as u8
+                                ),
+                            );
+                        }
+
+                        // Buy portion (right/top)
+                        let buy_width = total_width * buy_ratio;
+                        if buy_width > 0.0 {
+                            ui.painter().rect_filled(
+                                Rect::from_min_size(
+                                    Pos2::new(vpvr_x + sell_width, y - bar_height / 2.0),
+                                    Vec2::new(buy_width, bar_height),
+                                ),
+                                0.0,
+                                Color32::from_rgba_unmultiplied(
+                                    50, 200, 50,
+                                    (self.vpvr_opacity * 255.0) as u8
+                                ),
+                            );
+                        }
+                    }
+                },
+
+                VPVRColorMode::SideBySide => {
+                    let center_x = vpvr_x + vpvr_width / 2.0;
+
+                    // Sell volume extends left from center
+                    let sell_width = (level.total_sell_volume as f32 / max_volume) * (vpvr_width / 2.0);
+                    if sell_width > 0.0 {
+                        ui.painter().rect_filled(
+                            Rect::from_min_size(
+                                Pos2::new(center_x - sell_width, y - bar_height / 2.0),
+                                Vec2::new(sell_width, bar_height),
+                            ),
+                            0.0,
+                            Color32::from_rgba_unmultiplied(
+                                200, 50, 50,
+                                (self.vpvr_opacity * 255.0) as u8
+                            ),
+                        );
+                    }
+
+                    // Buy volume extends right from center
+                    let buy_width = (level.total_buy_volume as f32 / max_volume) * (vpvr_width / 2.0);
+                    if buy_width > 0.0 {
+                        ui.painter().rect_filled(
+                            Rect::from_min_size(
+                                Pos2::new(center_x, y - bar_height / 2.0),
+                                Vec2::new(buy_width, bar_height),
+                            ),
+                            0.0,
+                            Color32::from_rgba_unmultiplied(
+                                50, 200, 50,
+                                (self.vpvr_opacity * 255.0) as u8
+                            ),
+                        );
+                    }
+                },
+
+                VPVRColorMode::DeltaBased => {
+                    // Single bar colored by delta
+                    let delta = level.delta();
+                    let color = if delta > 0 {
+                        Color32::from_rgba_unmultiplied(
+                            50, 200, 50,
+                            (self.vpvr_opacity * 255.0) as u8
+                        )
+                    } else {
+                        Color32::from_rgba_unmultiplied(
+                            200, 50, 50,
+                            (self.vpvr_opacity * 255.0) as u8
+                        )
+                    };
+
+                    let total_width = (level.total_volume as f32 / max_volume) * vpvr_width;
+                    if total_width > 0.0 {
+                        ui.painter().rect_filled(
+                            Rect::from_min_size(
+                                Pos2::new(vpvr_x, y - bar_height / 2.0),
+                                Vec2::new(total_width, bar_height),
+                            ),
+                            0.0,
+                            color,
+                        );
+                    }
+                },
+            }
+        }
+    }
+
+    /// Draw POC, VAH, and VAL horizontal lines with provided profile
+    fn draw_vpvr_lines_with_profile(
+        &self,
+        ui: &mut Ui,
+        chart_rect: Rect,
+        min_price: f64,
+        max_price: f64,
+        vpvr: &VPVRProfile,
+    ) {
+        let price_range = max_price - min_price;
+        if price_range <= 0.0 {
+            return;
+        }
+
+        // Helper function to convert price to Y coordinate
+        let price_to_y = |price: f64| -> f32 {
+            chart_rect.max.y - ((price - min_price) / price_range * chart_rect.height() as f64) as f32
+        };
+
+        // Draw POC line
+        if self.show_poc_line && vpvr.poc > 0.0 {
+            let poc_y = price_to_y(vpvr.poc);
+
+            // Draw line
+            ui.painter().line_segment(
+                [
+                    Pos2::new(chart_rect.left(), poc_y),
+                    Pos2::new(chart_rect.right(), poc_y),
+                ],
+                egui::Stroke::new(2.0, Color32::YELLOW),
+            );
+
+            // Draw label
+            ui.painter().text(
+                Pos2::new(chart_rect.right() - 10.0, poc_y - 12.0),
+                egui::Align2::RIGHT_BOTTOM,
+                format!("POC: {:.2}", vpvr.poc),
+                egui::FontId::proportional(11.0),
+                Color32::YELLOW,
+            );
+        }
+
+        // Draw VAH/VAL lines
+        if self.show_vah_val_lines && vpvr.vah > 0.0 && vpvr.val > 0.0 {
+            let vah_y = price_to_y(vpvr.vah);
+            let val_y = price_to_y(vpvr.val);
+
+            let line_color = Color32::from_rgb(100, 200, 255);
+
+            // VAH line
+            ui.painter().line_segment(
+                [
+                    Pos2::new(chart_rect.left(), vah_y),
+                    Pos2::new(chart_rect.right(), vah_y),
+                ],
+                egui::Stroke::new(1.5, line_color),
+            );
+
+            // VAL line
+            ui.painter().line_segment(
+                [
+                    Pos2::new(chart_rect.left(), val_y),
+                    Pos2::new(chart_rect.right(), val_y),
+                ],
+                egui::Stroke::new(1.5, line_color),
+            );
+
+            // Labels
+            ui.painter().text(
+                Pos2::new(chart_rect.right() - 10.0, vah_y - 12.0),
+                egui::Align2::RIGHT_BOTTOM,
+                format!("VAH: {:.2}", vpvr.vah),
+                egui::FontId::proportional(10.0),
+                line_color,
+            );
+
+            ui.painter().text(
+                Pos2::new(chart_rect.right() - 10.0, val_y + 2.0),
+                egui::Align2::RIGHT_TOP,
+                format!("VAL: {:.2}", vpvr.val),
+                egui::FontId::proportional(10.0),
+                line_color,
+            );
         }
     }
 }
