@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use crate::data::{OrderImbalance, LiquidationEvent, VolumeProfile, GuiUpdate, DatabaseManager, BigOrderflowAlert, OrderflowEvent, BinanceSymbols, DepthSnapshot};
 use crate::analysis::volume_analysis::VolumeAnalyzer;
-use super::{ScreenerTheme, ScreenerPanel, ImbalancePanel, FootprintPanel, LiquidationPanel};
+use super::{ScreenerTheme, ScreenerPanel, ImbalancePanel, FootprintPanel, LiquidationPanel, DOMPanel};
 
 #[derive(Debug, PartialEq)]
 enum ActivePanel {
@@ -14,6 +14,7 @@ enum ActivePanel {
     Imbalance,
     Footprint,
     Liquidation,
+    DOM,
 }
 
 pub struct ScreenerApp {
@@ -22,7 +23,8 @@ pub struct ScreenerApp {
     imbalance_panel: ImbalancePanel,
     footprint_panel: FootprintPanel,
     liquidation_panel: LiquidationPanel,
-    
+    dom_panel: DOMPanel,
+
     // State
     active_panel: ActivePanel,
     
@@ -106,6 +108,7 @@ impl ScreenerApp {
             imbalance_panel: ImbalancePanel::new(),
             footprint_panel: FootprintPanel::new_with_symbols(symbols.clone()),
             liquidation_panel: LiquidationPanel::new(),
+            dom_panel: DOMPanel::new(symbols.first().unwrap_or(&"BTCUSDT".to_string()).clone()),
             active_panel: ActivePanel::Screener,
             imbalance_receiver: Some(imbalance_receiver),
             liquidation_receiver: Some(liquidation_receiver),
@@ -174,24 +177,26 @@ impl ScreenerApp {
             }
         }
 
-        // Process orderflow events for real-time footprint
+        // Process orderflow events for real-time footprint and DOM
         if let Some(receiver) = &mut self.orderflow_receiver {
             let mut count = 0;
             while let Ok(orderflow_event) = receiver.try_recv() {
                 count += 1;
                 self.footprint_panel.add_orderflow_event(&orderflow_event);
+                self.dom_panel.process_trade(&orderflow_event);
             }
             if count > 0 {
-                tracing::debug!("GUI received {} orderflow events for footprint", count);
+                tracing::debug!("GUI received {} orderflow events for footprint & DOM", count);
             }
         }
 
-        // Process depth snapshots for LOB heatmap
+        // Process depth snapshots for LOB heatmap and DOM
         if let Some(receiver) = &mut self.depth_snapshot_receiver {
             let mut count = 0;
             while let Ok((symbol, snapshot)) = receiver.try_recv() {
                 count += 1;
-                self.footprint_panel.add_depth_snapshot(symbol, snapshot);
+                self.footprint_panel.add_depth_snapshot(symbol.clone(), snapshot.clone());
+                self.dom_panel.update_depth(snapshot);
             }
             if count > 0 {
                 tracing::debug!("GUI received {} depth snapshots", count);
@@ -394,6 +399,7 @@ impl ScreenerApp {
             ui.selectable_value(&mut self.active_panel, ActivePanel::Imbalance, "⚖️ Imbalance");
             ui.selectable_value(&mut self.active_panel, ActivePanel::Footprint, "📈 Footprint");
             ui.selectable_value(&mut self.active_panel, ActivePanel::Liquidation, "💥 Liquidations");
+            ui.selectable_value(&mut self.active_panel, ActivePanel::DOM, "📚 DOM");
         });
     }
 
@@ -410,6 +416,9 @@ impl ScreenerApp {
             }
             ActivePanel::Liquidation => {
                 self.liquidation_panel.show(ui);
+            }
+            ActivePanel::DOM => {
+                self.dom_panel.show(ui);
             }
         }
     }

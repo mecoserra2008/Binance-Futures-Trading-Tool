@@ -6,6 +6,7 @@ pub mod liquidation_panel;
 pub mod theme;
 pub mod heatmap_colors;
 pub mod drawing_tools;
+pub mod dom_window;
 
 pub use app::*;
 pub use screener_panel::*;
@@ -15,3 +16,4 @@ pub use liquidation_panel::*;
 pub use theme::*;
 pub use heatmap_colors::*;
 pub use drawing_tools::*;
+pub use dom_window::*;

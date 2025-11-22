@@ -29,7 +29,7 @@ pub struct TradedVolumeTracker {
     symbol: String,
 
     // price_tick -> VolumeAtPrice
-    volume_at_price: HashMap<i64, VolumeAtPrice>,
+    pub volume_at_price: HashMap<i64, VolumeAtPrice>,
 
     tick_size: f64,
     max_price_levels: usize,
