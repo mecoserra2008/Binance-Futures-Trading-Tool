@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use url::Url;
 
 use crate::config::Settings;
-use super::{OrderflowEvent, LiquidationEvent};
+use super::{OrderflowEvent, LiquidationEvent, DepthUpdate};
 
 #[derive(Debug, Deserialize)]
 struct BinanceAggTradeMessage {
@@ -84,6 +84,7 @@ pub struct WebSocketManager {
     settings: Settings,
     orderflow_sender: mpsc::Sender<OrderflowEvent>,
     liquidation_sender: Option<mpsc::Sender<LiquidationEvent>>,
+    depth_sender: Option<mpsc::Sender<DepthUpdate>>,
     active_symbols: Vec<String>,
 }
 
@@ -93,12 +94,17 @@ impl WebSocketManager {
             settings,
             orderflow_sender,
             liquidation_sender: None,
+            depth_sender: None,
             active_symbols: Vec::new(),
         }
     }
 
     pub fn set_liquidation_sender(&mut self, sender: mpsc::Sender<LiquidationEvent>) {
         self.liquidation_sender = Some(sender);
+    }
+
+    pub fn set_depth_sender(&mut self, sender: mpsc::Sender<DepthUpdate>) {
+        self.depth_sender = Some(sender);
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -108,11 +114,19 @@ impl WebSocketManager {
 
         // Start trade streams
         let trade_handle = self.start_trade_streams().await?;
-        
+
         // Start liquidation stream
         let liquidation_handle = self.start_liquidation_stream().await?;
 
-        // Wait for both streams
+        // Start depth streams if enabled
+        let depth_handle = if self.depth_sender.is_some() {
+            Some(self.start_depth_streams().await?)
+        } else {
+            info!("Depth streams disabled (no depth sender configured)");
+            None
+        };
+
+        // Wait for all streams
         tokio::select! {
             result = trade_handle => {
                 if let Err(e) = result {
@@ -122,6 +136,11 @@ impl WebSocketManager {
             result = liquidation_handle => {
                 if let Err(e) = result {
                     error!("Liquidation stream error: {}", e);
+                }
+            }
+            result = async { if let Some(h) = depth_handle { h.await } else { Ok(Ok(())) } } => {
+                if let Err(e) = result {
+                    error!("Depth stream error: {:?}", e);
                 }
             }
         }
@@ -397,6 +416,163 @@ impl WebSocketManager {
 
             if let Err(e) = liquidation_sender.try_send(event) {
                 debug!("Failed to send liquidation event: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn start_depth_streams(&self) -> Result<tokio::task::JoinHandle<Result<()>>> {
+        let settings = self.settings.clone();
+        let depth_sender = self.depth_sender.clone();
+        let symbols = self.active_symbols.clone();
+
+        let handle = tokio::spawn(async move {
+            // Split symbols into chunks to avoid WebSocket limits
+            const MAX_STREAMS_PER_CONNECTION: usize = 200;
+            let symbol_chunks: Vec<Vec<String>> = symbols
+                .chunks(MAX_STREAMS_PER_CONNECTION)
+                .map(|chunk| chunk.to_vec())
+                .collect();
+
+            info!("Splitting {} symbols into {} depth WebSocket connections", symbols.len(), symbol_chunks.len());
+
+            let mut connection_handles = Vec::new();
+
+            for (i, chunk) in symbol_chunks.into_iter().enumerate() {
+                let settings_clone = settings.clone();
+                let sender_clone = depth_sender.clone();
+
+                let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
+                    let mut retry_count = 0;
+                    let max_retries = settings_clone.binance.max_reconnect_attempts;
+
+                    loop {
+                        match Self::connect_depth_streams(&settings_clone, &sender_clone, &chunk).await {
+                            Ok(_) => {
+                                info!("Depth stream connection {} connected successfully with {} symbols", i, chunk.len());
+                                retry_count = 0;
+                            }
+                            Err(e) => {
+                                retry_count += 1;
+                                error!("Depth stream connection {} failed (attempt {}/{}): {}",
+                                       i, retry_count, max_retries, e);
+
+                                if retry_count >= max_retries {
+                                    return Err(anyhow!("Max retry attempts reached for depth stream connection {}", i));
+                                }
+
+                                let delay = Duration::from_millis(
+                                    settings_clone.binance.reconnect_delay_ms * retry_count as u64
+                                );
+                                warn!("Reconnecting depth stream connection {} in {:?}", i, delay);
+                                sleep(delay).await;
+                            }
+                        }
+                    }
+                });
+
+                connection_handles.push(handle);
+            }
+
+            // Wait for all connections
+            for (i, handle) in connection_handles.into_iter().enumerate() {
+                if let Err(e) = handle.await {
+                    error!("Depth stream connection {} failed: {:?}", i, e);
+                }
+            }
+
+            Ok(())
+        });
+
+        Ok(handle)
+    }
+
+    async fn connect_depth_streams(
+        settings: &Settings,
+        depth_sender: &Option<mpsc::Sender<DepthUpdate>>,
+        symbols: &[String],
+    ) -> Result<()> {
+        let stream_names: Vec<String> = symbols
+            .iter()
+            .map(|s| format!("{}@depth@100ms", s.to_lowercase()))
+            .collect();
+
+        let url = format!("{}/ws", settings.binance.websocket_base_url);
+        let (ws_stream, _) = connect_async(&url).await?;
+        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
+        // Subscribe to streams
+        let subscription = StreamSubscription {
+            method: "SUBSCRIBE".to_string(),
+            params: stream_names.clone(),
+            id: 2,
+        };
+
+        let subscribe_msg = Message::Text(serde_json::to_string(&subscription)?);
+        ws_sender.send(subscribe_msg).await?;
+
+        info!("Subscribed to {} depth streams", symbols.len());
+        debug!("First few depth stream names: {:?}", &stream_names[..stream_names.len().min(5)]);
+
+        // Process incoming messages
+        let mut message_count = 0;
+        while let Some(msg) = ws_receiver.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    message_count += 1;
+                    if message_count % 1000 == 0 {
+                        info!("Depth WebSocket received {} messages", message_count);
+                    }
+                    if text.contains("error") {
+                        error!("Depth WebSocket error message: {}", text);
+                    }
+                    if let Some(sender) = depth_sender {
+                        if let Err(e) = Self::process_depth_message(&text, sender).await {
+                            debug!("Failed to process depth message: {}", e);
+                        }
+                    }
+                }
+                Ok(Message::Ping(ping)) => {
+                    ws_sender.send(Message::Pong(ping)).await?;
+                }
+                Ok(Message::Close(_)) => {
+                    warn!("Depth WebSocket connection closed by server");
+                    break;
+                }
+                Err(e) => {
+                    error!("Depth WebSocket error: {}", e);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        Err(anyhow!("Depth stream connection lost"))
+    }
+
+    async fn process_depth_message(
+        text: &str,
+        depth_sender: &mpsc::Sender<DepthUpdate>,
+    ) -> Result<()> {
+        // Handle subscription confirmation messages
+        if text.contains("\"result\":null") || text.contains("\"id\":") {
+            debug!("Depth WebSocket subscription confirmed");
+            return Ok(());
+        }
+
+        let depth_update: DepthUpdate = serde_json::from_str(text)
+            .map_err(|e| {
+                debug!("Failed to parse depth message: {}. Message snippet: {}", e, &text[..text.len().min(100)]);
+                e
+            })?;
+
+        if depth_update.event_type == "depthUpdate" {
+            debug!("Parsed depthUpdate for {}: {} bids, {} asks",
+                   depth_update.symbol, depth_update.bids.len(), depth_update.asks.len());
+
+            if let Err(e) = depth_sender.try_send(depth_update) {
+                debug!("Failed to send depth update: {}", e);
             }
         }
 

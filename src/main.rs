@@ -32,6 +32,8 @@ async fn main() -> anyhow::Result<()> {
     let (volume_tx, volume_rx) = mpsc::channel::<VolumeProfile>(1000);
     let (gui_update_tx, gui_update_rx) = mpsc::channel::<GuiUpdate>(1000);
     let (gui_orderflow_tx, gui_orderflow_rx) = mpsc::channel::<OrderflowEvent>(10000);
+    let (depth_tx, depth_rx) = mpsc::channel::<DepthUpdate>(10000);
+    let (depth_snapshot_tx, depth_snapshot_rx) = mpsc::channel::<(String, DepthSnapshot)>(1000);
 
     // Initialize database
     let db_manager = DatabaseManager::new("data.db").await?;
@@ -40,10 +42,17 @@ async fn main() -> anyhow::Result<()> {
     // Start WebSocket manager
     let mut ws_manager = WebSocketManager::new(settings.clone(), orderflow_tx.clone());
     ws_manager.set_liquidation_sender(liquidation_tx.clone());
+    ws_manager.set_depth_sender(depth_tx.clone());
     let ws_handle = tokio::spawn(async move {
         if let Err(e) = ws_manager.start().await {
             error!("WebSocket manager error: {}", e);
         }
+    });
+
+    // Start OrderBookManager
+    let orderbook_manager = OrderBookManager::new(depth_rx, depth_snapshot_tx);
+    let orderbook_handle = tokio::spawn(async move {
+        orderbook_manager.start().await;
     });
 
     // Start analysis engines
@@ -72,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
         volume_rx,
         gui_update_rx,
         gui_orderflow_rx,
+        depth_snapshot_rx,
         db_manager,
         settings.binance.symbols.clone(), // Pass the actual subscribed symbols
     ).await?;

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use anyhow::Result;
 
-use crate::data::{OrderImbalance, LiquidationEvent, VolumeProfile, GuiUpdate, DatabaseManager, BigOrderflowAlert, OrderflowEvent, BinanceSymbols};
+use crate::data::{OrderImbalance, LiquidationEvent, VolumeProfile, GuiUpdate, DatabaseManager, BigOrderflowAlert, OrderflowEvent, BinanceSymbols, DepthSnapshot};
 use crate::analysis::volume_analysis::VolumeAnalyzer;
 use super::{ScreenerTheme, ScreenerPanel, ImbalancePanel, FootprintPanel, LiquidationPanel};
 
@@ -32,6 +32,7 @@ pub struct ScreenerApp {
     volume_receiver: Option<mpsc::Receiver<VolumeProfile>>,
     gui_update_receiver: Option<mpsc::Receiver<GuiUpdate>>,
     orderflow_receiver: Option<mpsc::Receiver<OrderflowEvent>>,
+    depth_snapshot_receiver: Option<mpsc::Receiver<(String, DepthSnapshot)>>,
     
     // Database
     database: Arc<DatabaseManager>,
@@ -81,6 +82,7 @@ impl ScreenerApp {
         volume_receiver: mpsc::Receiver<VolumeProfile>,
         gui_update_receiver: mpsc::Receiver<GuiUpdate>,
         orderflow_receiver: mpsc::Receiver<OrderflowEvent>,
+        depth_snapshot_receiver: mpsc::Receiver<(String, DepthSnapshot)>,
         database: Arc<DatabaseManager>,
         subscribed_symbols: Vec<String>,
     ) -> Result<Self> {
@@ -110,6 +112,7 @@ impl ScreenerApp {
             volume_receiver: Some(volume_receiver_new), // Use new receiver from volume analyzer
             gui_update_receiver: Some(gui_update_receiver),
             orderflow_receiver: Some(orderflow_receiver),
+            depth_snapshot_receiver: Some(depth_snapshot_receiver),
             database,
             connection_status: ConnectionStatus::default(),
             last_update_time: std::time::Instant::now(),
@@ -180,6 +183,18 @@ impl ScreenerApp {
             }
             if count > 0 {
                 tracing::debug!("GUI received {} orderflow events for footprint", count);
+            }
+        }
+
+        // Process depth snapshots for LOB heatmap
+        if let Some(receiver) = &mut self.depth_snapshot_receiver {
+            let mut count = 0;
+            while let Ok((symbol, snapshot)) = receiver.try_recv() {
+                count += 1;
+                self.footprint_panel.add_depth_snapshot(symbol, snapshot);
+            }
+            if count > 0 {
+                tracing::debug!("GUI received {} depth snapshots", count);
             }
         }
 
