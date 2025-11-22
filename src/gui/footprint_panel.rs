@@ -1,6 +1,7 @@
 use egui::{Color32, RichText, Ui, Rect, Pos2, Vec2, Stroke};
 use std::collections::{HashMap, VecDeque, BTreeMap};
-use crate::data::{VolumeProfile, OrderflowEvent, BinanceSymbols, DepthSnapshot};
+use crate::data::{VolumeProfile, OrderflowEvent, BinanceSymbols, DepthSnapshot, market_data::Candle};
+use crate::analysis::indicators::{Indicator, SimpleMovingAverage, ExponentialMovingAverage, BollingerBands, RSI};
 use super::{ScreenerTheme, HeatmapColorScheme, DrawingToolsManager, ActiveTool, DrawingTool};
 use chrono::{DateTime, Utc};
 
@@ -873,6 +874,9 @@ impl FootprintPanel {
 
         // Draw drawing tools on top of candles
         self.draw_drawing_tools(ui, chart_rect, &all_candles, candle_width, overall_min_price, overall_max_price);
+
+        // Draw indicators on top of everything
+        self.draw_indicators(ui, chart_rect, &all_candles, candle_width, overall_min_price, overall_max_price);
     }
 
     fn calculate_overall_price_range(&self, candles: &[FootprintCandle]) -> (f64, f64) {
@@ -1073,6 +1077,36 @@ impl FootprintPanel {
                 }
             }
         }
+    }
+
+    // Helper method to convert FootprintCandles to Candles for indicator calculation
+    fn footprint_candles_to_candles(&self, footprint_candles: &[FootprintCandle]) -> Vec<Candle> {
+        footprint_candles
+            .iter()
+            .map(|fc| {
+                // Calculate total volume from all cells
+                let total_volume: f64 = fc.cells.values().map(|cell| {
+                    (cell.bid_volume + cell.ask_volume) as f64
+                }).sum();
+
+                let buy_volume: f64 = fc.cells.values().map(|cell| cell.ask_volume as f64).sum();
+                let sell_volume: f64 = fc.cells.values().map(|cell| cell.bid_volume as f64).sum();
+
+                Candle {
+                    symbol: self.selected_symbol.clone(),
+                    timestamp: fc.timestamp,
+                    timeframe: self.available_timeframes[self.selected_timeframe_index].0.clone(),
+                    open_price: fc.open,
+                    high_price: fc.high,
+                    low_price: fc.low,
+                    close_price: fc.close,
+                    volume: total_volume,
+                    buy_volume,
+                    sell_volume,
+                    trade_count: fc.cells.len() as u32,
+                }
+            })
+            .collect()
     }
 
     // Coordinate conversion helper methods
@@ -1577,6 +1611,132 @@ impl FootprintPanel {
         // Update selected symbol if it's not in the new list
         if !self.symbols.contains(&self.selected_symbol) {
             self.selected_symbol = self.symbols.first().unwrap_or(&"BTCUSDT".to_string()).clone();
+        }
+    }
+
+    fn draw_indicators(
+        &self,
+        ui: &mut Ui,
+        chart_rect: Rect,
+        footprint_candles: &[FootprintCandle],
+        candle_width: f32,
+        min_price: f64,
+        max_price: f64,
+    ) {
+        if footprint_candles.is_empty() {
+            return;
+        }
+
+        // Convert FootprintCandles to Candles for indicator calculation
+        let candles = self.footprint_candles_to_candles(footprint_candles);
+
+        let painter = ui.painter();
+        let price_range = max_price - min_price;
+        if price_range <= 0.0 {
+            return;
+        }
+
+        // Helper to convert price to Y coordinate
+        let price_to_y = |price: f64| -> f32 {
+            chart_rect.max.y - ((price - min_price) / price_range) as f32 * chart_rect.height()
+        };
+
+        // Draw SMA
+        if self.show_sma && candles.len() >= self.sma_period {
+            let sma = SimpleMovingAverage::new(self.sma_period);
+            let sma_values = sma.calculate(&candles);
+
+            let mut points = Vec::new();
+            for (i, &value) in sma_values.iter().enumerate() {
+                if !value.is_nan() {
+                    let x = chart_rect.min.x + (i as f32 * candle_width) + self.pan_x + candle_width / 2.0;
+                    let y = price_to_y(value);
+                    points.push(Pos2::new(x, y));
+                }
+            }
+
+            // Draw SMA line
+            if points.len() >= 2 {
+                painter.add(egui::Shape::line(
+                    points,
+                    Stroke::new(2.0, Color32::from_rgb(255, 165, 0)), // Orange
+                ));
+            }
+        }
+
+        // Draw EMA
+        if self.show_ema && candles.len() >= self.ema_period {
+            let ema = ExponentialMovingAverage::new(self.ema_period);
+            let ema_values = ema.calculate(&candles);
+
+            let mut points = Vec::new();
+            for (i, &value) in ema_values.iter().enumerate() {
+                if !value.is_nan() {
+                    let x = chart_rect.min.x + (i as f32 * candle_width) + self.pan_x + candle_width / 2.0;
+                    let y = price_to_y(value);
+                    points.push(Pos2::new(x, y));
+                }
+            }
+
+            // Draw EMA line
+            if points.len() >= 2 {
+                painter.add(egui::Shape::line(
+                    points,
+                    Stroke::new(2.0, Color32::from_rgb(0, 255, 255)), // Cyan
+                ));
+            }
+        }
+
+        // Draw Bollinger Bands
+        if self.show_bollinger && candles.len() >= self.bollinger_period {
+            let bb = BollingerBands::new(self.bollinger_period, self.bollinger_std_dev);
+            let bb_result = bb.calculate(&candles);
+
+            let mut upper_points = Vec::new();
+            let mut middle_points = Vec::new();
+            let mut lower_points = Vec::new();
+
+            for i in 0..bb_result.upper.len() {
+                if !bb_result.upper[i].is_nan() {
+                    let x = chart_rect.min.x + (i as f32 * candle_width) + self.pan_x + candle_width / 2.0;
+                    upper_points.push(Pos2::new(x, price_to_y(bb_result.upper[i])));
+                    middle_points.push(Pos2::new(x, price_to_y(bb_result.middle[i])));
+                    lower_points.push(Pos2::new(x, price_to_y(bb_result.lower[i])));
+                }
+            }
+
+            let bb_color = Color32::from_rgb(138, 43, 226); // BlueViolet
+
+            // Draw bands
+            if upper_points.len() >= 2 {
+                painter.add(egui::Shape::line(upper_points.clone(), Stroke::new(1.5, bb_color)));
+                painter.add(egui::Shape::line(middle_points, Stroke::new(1.5, bb_color)));
+                painter.add(egui::Shape::line(lower_points.clone(), Stroke::new(1.5, bb_color)));
+
+                // Fill area between bands with semi-transparent color
+                let mut fill_points = upper_points.clone();
+                fill_points.extend(lower_points.iter().rev());
+                if fill_points.len() >= 3 {
+                    painter.add(egui::Shape::convex_polygon(
+                        fill_points,
+                        Color32::from_rgba_premultiplied(138, 43, 226, 30),
+                        Stroke::NONE,
+                    ));
+                }
+            }
+        }
+
+        // Note: RSI would require a sub-chart below the main chart
+        // For now, we'll skip RSI rendering (would need UI refactoring)
+        if self.show_rsi {
+            // Display a message that RSI requires a separate panel
+            painter.text(
+                Pos2::new(chart_rect.min.x + 10.0, chart_rect.max.y - 20.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("RSI({}) enabled - requires sub-chart (coming soon)", self.rsi_period),
+                egui::FontId::proportional(11.0),
+                Color32::from_rgb(255, 255, 100),
+            );
         }
     }
 
