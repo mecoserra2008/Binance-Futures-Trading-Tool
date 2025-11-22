@@ -31,12 +31,56 @@ backup_interval_hours = 24
 [analysis]
 volume_threshold_percentage = 0.5
 imbalance_window_seconds = 60
-footprint_timeframes = ["1m", "5m", "15m"]
+footprint_timeframes = ["15s", "30s", "1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"]
+base_timeframe = "1m"
+max_candles_per_symbol = 10000
 liquidation_size_threshold = 100000.0
+
+[analysis.lob]
+enable_depth_data = true
+depth_update_speed = "100ms"  # Binance supports 100ms or 1000ms
+max_depth_levels = 100
+snapshot_interval_ms = 100
+history_snapshots = 500  # 50 seconds at 100ms intervals
 
 [gui]
 refresh_rate_ms = 16
 max_displayed_rows = 100
+target_fps = 60
+enable_render_culling = true
+max_visible_candles = 200
+
+[gui.footprint]
+enable_lob_heatmap = true
+heatmap_default_intensity = 0.7
+heatmap_color_scheme = "Green/Red"  # Options: "Green/Red", "Blue/Orange", "Monochrome", "Purple/Yellow"
+heatmap_opacity = 0.8
+x_scale_sensitivity = 0.01
+y_scale_sensitivity = 0.01
+enable_independent_axis_scaling = true
+show_scale_indicators = true
+default_timeframe = "1m"
+max_candles_display = 50
+
+[gui.dom]
+enable_detachable = true
+default_aggregation_level = 0.01
+default_num_levels = 20
+show_limit_orders = true
+show_traded_volume = true
+color_intensity = 0.7
+
+[gui.indicators]
+enable_drawing_tools = true
+enable_technical_indicators = true
+default_bollinger_period = 20
+default_bollinger_std_dev = 2.0
+default_sma_periods = [20, 50, 200]
+default_ema_periods = [12, 26]
+default_rsi_period = 14
+default_macd_fast = 12
+default_macd_slow = 26
+default_macd_signal = 9
 
 [gui.color_scheme]
 background = "#1e1e1e"
