@@ -1,6 +1,6 @@
 use egui::{Color32, RichText, Ui, Rect, Pos2, Vec2};
 use std::collections::{HashMap, VecDeque, BTreeMap};
-use crate::data::{VolumeProfile, OrderflowEvent, BinanceSymbols};
+use crate::data::{VolumeProfile, OrderflowEvent, BinanceSymbols, DepthSnapshot};
 use super::ScreenerTheme;
 use chrono::{DateTime, Utc};
 
@@ -128,6 +128,10 @@ pub struct FootprintPanel {
 
     // Cumulative Volume Delta tracking per symbol
     cumulative_cvd: HashMap<String, i64>,
+
+    // LOB Heatmap data
+    depth_snapshots: HashMap<String, VecDeque<DepthSnapshot>>,
+    max_depth_snapshots: usize,
 }
 
 impl FootprintPanel {
@@ -170,6 +174,10 @@ impl FootprintPanel {
 
             // Cumulative CVD tracking
             cumulative_cvd: HashMap::new(),
+
+            // LOB Heatmap data
+            depth_snapshots: HashMap::new(),
+            max_depth_snapshots: 100,  // Keep last 100 snapshots per symbol
         }
     }
 
@@ -219,6 +227,10 @@ impl FootprintPanel {
 
             // Cumulative CVD tracking
             cumulative_cvd: HashMap::new(),
+
+            // LOB Heatmap data
+            depth_snapshots: HashMap::new(),
+            max_depth_snapshots: 100,  // Keep last 100 snapshots per symbol
         }
     }
 
@@ -260,6 +272,16 @@ impl FootprintPanel {
 
         // Add trade to current candle
         candle.add_trade(event);
+    }
+
+    pub fn add_depth_snapshot(&mut self, symbol: String, snapshot: DepthSnapshot) {
+        let snapshots = self.depth_snapshots.entry(symbol).or_insert_with(VecDeque::new);
+        snapshots.push_back(snapshot);
+
+        // Maintain max size
+        while snapshots.len() > self.max_depth_snapshots {
+            snapshots.pop_front();
+        }
     }
 
     pub fn get_profile_count(&self) -> usize {
