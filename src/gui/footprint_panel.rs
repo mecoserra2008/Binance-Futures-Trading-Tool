@@ -90,6 +90,12 @@ impl FootprintCandle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DragAxis {
+    Horizontal,  // X-axis (time)
+    Vertical,    // Y-axis (price)
+}
+
 pub struct FootprintPanel {
     symbols: Vec<String>,
     selected_symbol: String,
@@ -126,9 +132,18 @@ pub struct FootprintPanel {
     min_zoom: f32,
     max_zoom: f32,
 
+    // Independent axis scaling (for right-click drag)
+    x_scale: f32,  // Time axis scale
+    y_scale: f32,  // Price axis scale
+    x_scale_sensitivity: f32,
+    y_scale_sensitivity: f32,
+
     // Mouse interaction state
     dragging: bool,
+    right_dragging: bool,
+    drag_start_pos: Option<egui::Pos2>,
     last_mouse_pos: Option<egui::Pos2>,
+    drag_axis: Option<DragAxis>,  // Which axis is being scaled
 
     // Symbol management
     symbol_category: String,
@@ -194,9 +209,18 @@ impl FootprintPanel {
             min_zoom: 0.1,
             max_zoom: 10.0,
 
+            // Independent axis scaling
+            x_scale: 1.0,
+            y_scale: 1.0,
+            x_scale_sensitivity: 0.01,
+            y_scale_sensitivity: 0.01,
+
             // Mouse interaction state
             dragging: false,
+            right_dragging: false,
+            drag_start_pos: None,
             last_mouse_pos: None,
+            drag_axis: None,
 
             // Symbol management
             symbol_category: "High Volume".to_string(),
@@ -269,9 +293,18 @@ impl FootprintPanel {
             min_zoom: 0.1,
             max_zoom: 10.0,
 
+            // Independent axis scaling
+            x_scale: 1.0,
+            y_scale: 1.0,
+            x_scale_sensitivity: 0.01,
+            y_scale_sensitivity: 0.01,
+
             // Mouse interaction state
             dragging: false,
+            right_dragging: false,
+            drag_start_pos: None,
             last_mouse_pos: None,
+            drag_axis: None,
 
             // Symbol management
             symbol_category: "Default".to_string(),
@@ -607,9 +640,9 @@ impl FootprintPanel {
             return;
         }
 
-        // Calculate candle width for statistics (before applying zoom for consistency)
+        // Calculate candle width with both zoom and X-axis scale
         let base_candle_width = chart_rect.width() / all_candles.len().max(1) as f32;
-        let candle_width = base_candle_width * self.zoom_level;
+        let candle_width = base_candle_width * self.zoom_level * self.x_scale;
 
         // Draw statistics header above chart
         self.draw_candle_statistics(ui, &all_candles, available_rect.min, available_rect.width(), stats_height, self.pan_x, candle_width);
@@ -622,8 +655,8 @@ impl FootprintPanel {
             return;
         }
 
-        // Apply zoom and pan to price range
-        let zoomed_price_range = base_price_range / self.zoom_level as f64;
+        // Apply zoom, Y-axis scale, and pan to price range
+        let zoomed_price_range = base_price_range / (self.zoom_level as f64 * self.y_scale as f64);
         let pan_price_offset = self.pan_y as f64 * base_price_range / chart_rect.height() as f64;
 
         let overall_min_price = base_min_price + pan_price_offset;
@@ -774,7 +807,11 @@ impl FootprintPanel {
     fn handle_mouse_interactions(&mut self, ui: &mut Ui, chart_rect: Rect) {
         let response = ui.allocate_rect(chart_rect, egui::Sense::click_and_drag());
 
-        // Handle scroll wheel for zooming
+        // Check which mouse button is being used
+        let is_primary_down = ui.input(|i| i.pointer.primary_down());
+        let is_secondary_down = ui.input(|i| i.pointer.secondary_down());
+
+        // Handle scroll wheel for uniform zooming
         if response.hovered() {
             ui.input(|i| {
                 let scroll_delta = i.scroll_delta.y;
@@ -796,8 +833,63 @@ impl FootprintPanel {
             });
         }
 
-        // Handle dragging for panning
-        if response.dragged() {
+        // Handle RIGHT-CLICK drag for axis-specific scaling
+        if is_secondary_down && response.dragged() {
+            if let Some(current_pos) = response.interact_pointer_pos() {
+                // Initialize drag if starting
+                if !self.right_dragging {
+                    self.right_dragging = true;
+                    self.drag_start_pos = Some(current_pos);
+                    self.last_mouse_pos = Some(current_pos);
+                    self.drag_axis = None;
+                }
+
+                if let Some(last_pos) = self.last_mouse_pos {
+                    let delta = current_pos - last_pos;
+                    let abs_delta_x = delta.x.abs();
+                    let abs_delta_y = delta.y.abs();
+
+                    // Determine drag axis if not yet determined (use 10px threshold)
+                    if self.drag_axis.is_none() {
+                        if abs_delta_x > 10.0 || abs_delta_y > 10.0 {
+                            if abs_delta_x > abs_delta_y {
+                                self.drag_axis = Some(DragAxis::Horizontal);
+                            } else {
+                                self.drag_axis = Some(DragAxis::Vertical);
+                            }
+                        }
+                    }
+
+                    // Apply scaling based on determined axis
+                    match self.drag_axis {
+                        Some(DragAxis::Horizontal) => {
+                            // Scale X-axis (time) - drag right = expand, drag left = compress
+                            let scale_change = delta.x * self.x_scale_sensitivity;
+                            self.x_scale = (self.x_scale + scale_change).clamp(0.1, 10.0);
+                        }
+                        Some(DragAxis::Vertical) => {
+                            // Scale Y-axis (price) - drag down = expand, drag up = compress
+                            let scale_change = delta.y * self.y_scale_sensitivity;
+                            self.y_scale = (self.y_scale + scale_change).clamp(0.1, 10.0);
+                        }
+                        None => {
+                            // Still determining axis, don't scale yet
+                        }
+                    }
+
+                    self.last_mouse_pos = Some(current_pos);
+                }
+            }
+        } else if self.right_dragging && !is_secondary_down {
+            // Right-click released
+            self.right_dragging = false;
+            self.drag_start_pos = None;
+            self.last_mouse_pos = None;
+            self.drag_axis = None;
+        }
+
+        // Handle LEFT-CLICK drag for panning (only if not right-dragging)
+        if is_primary_down && response.dragged() && !self.right_dragging {
             if let Some(current_pos) = response.interact_pointer_pos() {
                 if let Some(last_pos) = self.last_mouse_pos {
                     let delta = current_pos - last_pos;
@@ -807,15 +899,50 @@ impl FootprintPanel {
                 self.last_mouse_pos = Some(current_pos);
                 self.dragging = true;
             }
-        }
-
-        if response.drag_released() {
+        } else if self.dragging && !is_primary_down {
+            // Left-click released
             self.dragging = false;
             self.last_mouse_pos = None;
         }
 
-        if response.clicked() {
-            self.last_mouse_pos = response.interact_pointer_pos();
+        // Draw visual indicator for axis scaling
+        if self.right_dragging && self.drag_axis.is_some() {
+            let painter = ui.painter();
+            if let (Some(start_pos), Some(current_pos)) = (self.drag_start_pos, self.last_mouse_pos) {
+                match self.drag_axis {
+                    Some(DragAxis::Horizontal) => {
+                        // Draw horizontal line
+                        painter.line_segment(
+                            [Pos2::new(chart_rect.min.x, start_pos.y), Pos2::new(chart_rect.max.x, start_pos.y)],
+                            egui::Stroke::new(2.0, Color32::from_rgb(100, 150, 255))
+                        );
+                        // Draw scale indicator text
+                        painter.text(
+                            Pos2::new(current_pos.x, start_pos.y - 20.0),
+                            egui::Align2::CENTER_BOTTOM,
+                            format!("X-Scale: {:.2}x", self.x_scale),
+                            egui::FontId::proportional(14.0),
+                            Color32::WHITE
+                        );
+                    }
+                    Some(DragAxis::Vertical) => {
+                        // Draw vertical line
+                        painter.line_segment(
+                            [Pos2::new(start_pos.x, chart_rect.min.y), Pos2::new(start_pos.x, chart_rect.max.y)],
+                            egui::Stroke::new(2.0, Color32::from_rgb(100, 150, 255))
+                        );
+                        // Draw scale indicator text
+                        painter.text(
+                            Pos2::new(start_pos.x + 10.0, current_pos.y),
+                            egui::Align2::LEFT_CENTER,
+                            format!("Y-Scale: {:.2}x", self.y_scale),
+                            egui::FontId::proportional(14.0),
+                            Color32::WHITE
+                        );
+                    }
+                    None => {}
+                }
+            }
         }
 
         // Handle keyboard shortcuts for navigation
@@ -845,6 +972,8 @@ impl FootprintPanel {
             // Home key to reset view
             if i.key_pressed(egui::Key::Home) {
                 self.zoom_level = 1.0;
+                self.x_scale = 1.0;
+                self.y_scale = 1.0;
                 self.pan_x = 0.0;
                 self.pan_y = 0.0;
             }
