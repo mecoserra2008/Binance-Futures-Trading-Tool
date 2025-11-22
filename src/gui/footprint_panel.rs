@@ -95,10 +95,18 @@ pub struct FootprintPanel {
     selected_symbol: String,
     volume_profiles: HashMap<String, VecDeque<VolumeProfile>>,
 
-    // Footprint data
-    current_candles: HashMap<String, FootprintCandle>, // symbol -> current candle
-    completed_candles: HashMap<String, VecDeque<FootprintCandle>>, // symbol -> historical candles
-    timeframe_ms: u64, // 1 minute = 60000ms
+    // Footprint data - base timeframe storage (1m)
+    base_current_candles: HashMap<String, FootprintCandle>, // symbol -> current 1m candle
+    base_completed_candles: HashMap<String, VecDeque<FootprintCandle>>, // symbol -> historical 1m candles
+
+    // Timeframe management
+    available_timeframes: Vec<(String, u64)>, // (label, milliseconds)
+    selected_timeframe_index: usize,
+    timeframe_ms: u64, // Current timeframe in ms
+
+    // Cached aggregated candles for non-base timeframes
+    cached_aggregated_candles: HashMap<String, VecDeque<FootprintCandle>>,
+    cache_valid: bool,
 
     // Display settings
     max_candles_display: usize,
@@ -140,13 +148,35 @@ impl FootprintPanel {
         let scale_index = 2; // Default to 0.01
         let symbols = BinanceSymbols::get_high_volume_symbols(); // Use high-volume symbols by default
 
+        // Define available timeframes
+        let available_timeframes = vec![
+            ("15s".to_string(), 15_000u64),
+            ("30s".to_string(), 30_000u64),
+            ("1m".to_string(), 60_000u64),
+            ("5m".to_string(), 300_000u64),
+            ("15m".to_string(), 900_000u64),
+            ("30m".to_string(), 1_800_000u64),
+            ("1h".to_string(), 3_600_000u64),
+            ("4h".to_string(), 14_400_000u64),
+            ("12h".to_string(), 43_200_000u64),
+            ("1d".to_string(), 86_400_000u64),
+        ];
+        let selected_timeframe_index = 2; // Default to 1m (index 2)
+
         Self {
             symbols: symbols.clone(),
             selected_symbol: symbols.first().unwrap_or(&"BTCUSDT".to_string()).clone(),
             volume_profiles: HashMap::new(),
-            current_candles: HashMap::new(),
-            completed_candles: HashMap::new(),
-            timeframe_ms: 60000, // 1 minute
+            base_current_candles: HashMap::new(),
+            base_completed_candles: HashMap::new(),
+
+            // Timeframe management
+            timeframe_ms: available_timeframes[selected_timeframe_index].1,
+            available_timeframes,
+            selected_timeframe_index,
+            cached_aggregated_candles: HashMap::new(),
+            cache_valid: false,
+
             max_candles_display: 50,
             show_volume: true,
             show_delta: true,
@@ -193,13 +223,35 @@ impl FootprintPanel {
         let available_scales = vec![0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0];
         let scale_index = 2; // Default to 0.01
 
+        // Define available timeframes
+        let available_timeframes = vec![
+            ("15s".to_string(), 15_000u64),
+            ("30s".to_string(), 30_000u64),
+            ("1m".to_string(), 60_000u64),
+            ("5m".to_string(), 300_000u64),
+            ("15m".to_string(), 900_000u64),
+            ("30m".to_string(), 1_800_000u64),
+            ("1h".to_string(), 3_600_000u64),
+            ("4h".to_string(), 14_400_000u64),
+            ("12h".to_string(), 43_200_000u64),
+            ("1d".to_string(), 86_400_000u64),
+        ];
+        let selected_timeframe_index = 2; // Default to 1m (index 2)
+
         Self {
             symbols: default_symbols,
             selected_symbol: selected,
             volume_profiles: HashMap::new(),
-            current_candles: HashMap::new(),
-            completed_candles: HashMap::new(),
-            timeframe_ms: 60000,
+            base_current_candles: HashMap::new(),
+            base_completed_candles: HashMap::new(),
+
+            // Timeframe management
+            timeframe_ms: available_timeframes[selected_timeframe_index].1,
+            available_timeframes,
+            selected_timeframe_index,
+            cached_aggregated_candles: HashMap::new(),
+            cache_valid: false,
+
             max_candles_display: 50,
             show_volume: true,
             show_delta: true,
@@ -244,34 +296,43 @@ impl FootprintPanel {
     }
 
     pub fn add_orderflow_event(&mut self, event: &OrderflowEvent) {
+        // Always use base timeframe (1m = 60000ms) for incoming events
+        const BASE_TIMEFRAME_MS: u64 = 60_000;
         let current_time = chrono::Utc::now().timestamp_millis() as u64;
-        let candle_start = (current_time / self.timeframe_ms) * self.timeframe_ms;
+        let candle_start = (current_time / BASE_TIMEFRAME_MS) * BASE_TIMEFRAME_MS;
 
-        // Get or create current candle for this symbol
-        let candle = self.current_candles.entry(event.symbol.clone()).or_insert_with(|| {
+        // Get or create current base candle for this symbol
+        let candle = self.base_current_candles.entry(event.symbol.clone()).or_insert_with(|| {
             FootprintCandle::new(candle_start, self.price_scale)
         });
 
         // If this trade belongs to a new candle, complete the old one
-        if event.timestamp < candle.timestamp || event.timestamp >= candle.timestamp + self.timeframe_ms {
+        if event.timestamp < candle.timestamp || event.timestamp >= candle.timestamp + BASE_TIMEFRAME_MS {
             // Complete the old candle
             if candle.open != 0.0 { // Only if it has data
                 let completed_candle = candle.clone();
-                let completed_candles = self.completed_candles.entry(event.symbol.clone()).or_insert_with(VecDeque::new);
+                let completed_candles = self.base_completed_candles.entry(event.symbol.clone()).or_insert_with(VecDeque::new);
                 completed_candles.push_back(completed_candle);
 
-                while completed_candles.len() > self.max_candles_display {
+                // Keep up to 1000 base candles (more than display to allow aggregation)
+                while completed_candles.len() > 1000 {
                     completed_candles.pop_front();
                 }
+
+                // Invalidate cache when new base candle completes
+                self.cache_valid = false;
             }
 
             // Start new candle
-            let new_candle_start = (event.timestamp / self.timeframe_ms) * self.timeframe_ms;
+            let new_candle_start = (event.timestamp / BASE_TIMEFRAME_MS) * BASE_TIMEFRAME_MS;
             *candle = FootprintCandle::new(new_candle_start, self.price_scale);
         }
 
         // Add trade to current candle
         candle.add_trade(event);
+
+        // Invalidate cache on new trades (current candle updated)
+        self.cache_valid = false;
     }
 
     pub fn add_depth_snapshot(&mut self, symbol: String, snapshot: DepthSnapshot) {
@@ -286,6 +347,115 @@ impl FootprintPanel {
 
     pub fn get_profile_count(&self) -> usize {
         self.volume_profiles.values().map(|v| v.len()).sum()
+    }
+
+    /// Get candles for the selected timeframe, aggregating from base candles if needed
+    fn get_candles_for_timeframe(&mut self, symbol: &str) -> (Vec<FootprintCandle>, Option<FootprintCandle>) {
+        const BASE_TIMEFRAME_MS: u64 = 60_000;
+
+        // If base timeframe (1m) is selected, return base candles directly
+        if self.timeframe_ms == BASE_TIMEFRAME_MS {
+            let completed = self.base_completed_candles.get(symbol).cloned().unwrap_or_default();
+            let current = self.base_current_candles.get(symbol).cloned();
+            return (completed.into_iter().collect(), current);
+        }
+
+        // For larger timeframes, check cache or aggregate
+        if !self.cache_valid {
+            self.aggregate_candles_for_symbol(symbol);
+        }
+
+        let completed = self.cached_aggregated_candles.get(symbol).cloned().unwrap_or_default();
+        (completed.into_iter().collect(), None) // Current candle is included in aggregation
+    }
+
+    /// Aggregate base candles into the selected timeframe
+    fn aggregate_candles_for_symbol(&mut self, symbol: &str) {
+        let base_candles = self.base_completed_candles.get(symbol);
+        let current_candle = self.base_current_candles.get(symbol);
+
+        if base_candles.is_none() && current_candle.is_none() {
+            return;
+        }
+
+        // Combine completed and current base candles
+        let mut all_base_candles: Vec<FootprintCandle> = base_candles
+            .map(|c| c.iter().cloned().collect())
+            .unwrap_or_else(Vec::new);
+
+        if let Some(current) = current_candle {
+            if current.open != 0.0 {
+                all_base_candles.push(current.clone());
+            }
+        }
+
+        if all_base_candles.is_empty() {
+            return;
+        }
+
+        // Group base candles by target timeframe
+        let mut aggregated = VecDeque::new();
+        let mut current_group: Vec<FootprintCandle> = Vec::new();
+        let mut current_period_start: Option<u64> = None;
+
+        for candle in all_base_candles {
+            let period_start = (candle.timestamp / self.timeframe_ms) * self.timeframe_ms;
+
+            if let Some(current_start) = current_period_start {
+                if period_start != current_start {
+                    // New period - aggregate current group
+                    if !current_group.is_empty() {
+                        aggregated.push_back(Self::aggregate_candle_group(&current_group));
+                        current_group.clear();
+                    }
+                }
+            }
+
+            current_period_start = Some(period_start);
+            current_group.push(candle);
+        }
+
+        // Aggregate remaining group
+        if !current_group.is_empty() {
+            aggregated.push_back(Self::aggregate_candle_group(&current_group));
+        }
+
+        // Store in cache
+        self.cached_aggregated_candles.insert(symbol.to_string(), aggregated);
+        self.cache_valid = true;
+    }
+
+    /// Aggregate a group of candles into one
+    fn aggregate_candle_group(candles: &[FootprintCandle]) -> FootprintCandle {
+        if candles.is_empty() {
+            return FootprintCandle::new(0, 0.01);
+        }
+
+        let first = &candles[0];
+        let last = &candles[candles.len() - 1];
+
+        let mut aggregated = FootprintCandle {
+            timestamp: first.timestamp,
+            open: first.open,
+            high: candles.iter().map(|c| c.high).fold(f64::NEG_INFINITY, f64::max),
+            low: candles.iter().map(|c| c.low).fold(f64::INFINITY, f64::min),
+            close: last.close,
+            cells: BTreeMap::new(),
+            tick_size: first.tick_size,
+        };
+
+        // Merge all cells from all candles
+        for candle in candles {
+            for (price_tick, cell) in &candle.cells {
+                let entry = aggregated.cells.entry(*price_tick).or_insert_with(|| {
+                    FootprintCell::new(cell.price)
+                });
+                entry.bid_volume += cell.bid_volume;
+                entry.ask_volume += cell.ask_volume;
+            }
+        }
+
+        aggregated
     }
 
     pub fn show(&mut self, ui: &mut Ui) {
@@ -321,6 +491,27 @@ impl FootprintPanel {
 
                 ui.separator();
 
+                // Timeframe selector
+                ui.label("Timeframe:");
+                let mut timeframe_changed = false;
+                egui::ComboBox::from_id_source("footprint_timeframe_selector")
+                    .selected_text(&self.available_timeframes[self.selected_timeframe_index].0)
+                    .width(60.0)
+                    .show_ui(ui, |ui| {
+                        for (i, (label, _ms)) in self.available_timeframes.iter().enumerate() {
+                            if ui.selectable_value(&mut self.selected_timeframe_index, i, label).clicked() {
+                                timeframe_changed = true;
+                            }
+                        }
+                    });
+
+                if timeframe_changed {
+                    self.timeframe_ms = self.available_timeframes[self.selected_timeframe_index].1;
+                    self.cache_valid = false; // Invalidate cache when timeframe changes
+                }
+
+                ui.separator();
+
                 // Scale controls
                 ui.label("Scale:");
                 let mut scale_changed = false;
@@ -338,7 +529,8 @@ impl FootprintPanel {
                 if scale_changed {
                     self.price_scale = self.available_scales[self.scale_index];
                     // Clear current candles to force regeneration with new scale
-                    self.current_candles.clear();
+                    self.base_current_candles.clear();
+                    self.cache_valid = false;
                 }
 
                 ui.separator();
@@ -389,9 +581,9 @@ impl FootprintPanel {
         // Handle mouse interactions for pan and zoom
         self.handle_mouse_interactions(ui, chart_rect);
 
-        // Get candles for selected symbol
-        let completed_candles = self.completed_candles.get(&self.selected_symbol).cloned().unwrap_or_default();
-        let current_candle = self.current_candles.get(&self.selected_symbol);
+        // Get candles for selected symbol and timeframe
+        let selected_symbol = self.selected_symbol.clone();
+        let (completed_candles, current_candle) = self.get_candles_for_timeframe(&selected_symbol);
 
         if completed_candles.is_empty() && current_candle.is_none() {
             ui.centered_and_justified(|ui| {
@@ -401,10 +593,10 @@ impl FootprintPanel {
         }
 
         // Combine completed and current candles
-        let mut all_candles: Vec<FootprintCandle> = completed_candles.into_iter().collect();
+        let mut all_candles: Vec<FootprintCandle> = completed_candles;
         if let Some(current) = current_candle {
             if current.open != 0.0 {
-                all_candles.push(current.clone());
+                all_candles.push(current);
             }
         }
 

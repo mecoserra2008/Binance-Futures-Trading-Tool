@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::data::orderflow::OrderflowEvent;
+use crate::data::OrderflowEvent;
 
 /// Tracks traded volume at each price level
 #[derive(Debug, Clone, Default)]

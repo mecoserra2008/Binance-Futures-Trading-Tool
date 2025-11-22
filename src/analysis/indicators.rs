@@ -28,7 +28,7 @@ impl Indicator for SimpleMovingAverage {
             } else {
                 let sum: f64 = candles[i - self.period + 1..=i]
                     .iter()
-                    .map(|c| c.close)
+                    .map(|c| c.close_price)
                     .sum();
                 result.push(sum / self.period as f64);
             }
@@ -64,7 +64,7 @@ impl ExponentialMovingAverage {
         // First EMA = SMA
         let first_sma: f64 = candles[0..self.period]
             .iter()
-            .map(|c| c.close)
+            .map(|c| c.close_price)
             .sum::<f64>() / self.period as f64;
 
         for i in 0..candles.len() {
@@ -73,7 +73,7 @@ impl ExponentialMovingAverage {
             } else if i == self.period - 1 {
                 result.push(first_sma);
             } else {
-                let ema = (candles[i].close - result[i - 1]) * multiplier + result[i - 1];
+                let ema = (candles[i].close_price - result[i - 1]) * multiplier + result[i - 1];
                 result.push(ema);
             }
         }
@@ -125,7 +125,7 @@ impl BollingerBands {
             } else {
                 let prices: Vec<f64> = candles[i - self.period + 1..=i]
                     .iter()
-                    .map(|c| c.close)
+                    .map(|c| c.close_price)
                     .collect();
 
                 let std = self.calculate_std_dev(&prices, middle[i]);
@@ -173,7 +173,7 @@ impl RSI {
         let mut losses = Vec::new();
 
         for i in 1..candles.len() {
-            let change = candles[i].close - candles[i - 1].close;
+            let change = candles[i].close_price - candles[i - 1].close_price;
             gains.push(change.max(0.0));
             losses.push((-change).max(0.0));
         }
@@ -323,7 +323,7 @@ impl Indicator for WeightedMovingAverage {
                 let weighted_sum: f64 = candles[i - self.period + 1..=i]
                     .iter()
                     .enumerate()
-                    .map(|(j, c)| c.close * (j + 1) as f64)
+                    .map(|(j, c)| c.close_price * (j + 1) as f64)
                     .sum();
                 result.push(weighted_sum / weight_sum as f64);
             }

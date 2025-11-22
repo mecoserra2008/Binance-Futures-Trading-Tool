@@ -247,7 +247,18 @@ impl DrawingToolsManager {
 
     pub fn delete_selected(&mut self) {
         if let Some(id) = &self.selected_tool_id {
-            self.tools.retain(|t| self.get_tool_id(t) != id);
+            let id_to_delete = id.clone();
+            self.tools.retain(|t| {
+                let tool_id = match t {
+                    DrawingTool::TrendLine(tool) => &tool.id,
+                    DrawingTool::HorizontalLine(tool) => &tool.id,
+                    DrawingTool::VerticalLine(tool) => &tool.id,
+                    DrawingTool::FibonacciRetracement(tool) => &tool.id,
+                    DrawingTool::Rectangle(tool) => &tool.id,
+                    DrawingTool::Text(tool) => &tool.id,
+                };
+                tool_id != &id_to_delete
+            });
             self.selected_tool_id = None;
         }
     }
@@ -280,7 +291,7 @@ impl DrawingToolsManager {
         }
     }
 
-    fn get_tool_id(&self, tool: &DrawingTool) -> &str {
+    fn get_tool_id<'a>(&self, tool: &'a DrawingTool) -> &'a str {
         match tool {
             DrawingTool::TrendLine(t) => &t.id,
             DrawingTool::HorizontalLine(h) => &h.id,
