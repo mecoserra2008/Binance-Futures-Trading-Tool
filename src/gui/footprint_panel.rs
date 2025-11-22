@@ -1,7 +1,7 @@
 use egui::{Color32, RichText, Ui, Rect, Pos2, Vec2};
 use std::collections::{HashMap, VecDeque, BTreeMap};
 use crate::data::{VolumeProfile, OrderflowEvent, BinanceSymbols, DepthSnapshot};
-use super::ScreenerTheme;
+use super::{ScreenerTheme, HeatmapColorScheme};
 use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone)]
@@ -155,6 +155,11 @@ pub struct FootprintPanel {
     // LOB Heatmap data
     depth_snapshots: HashMap<String, VecDeque<DepthSnapshot>>,
     max_depth_snapshots: usize,
+
+    // LOB Heatmap rendering settings
+    enable_heatmap: bool,
+    heatmap_color_scheme: HeatmapColorScheme,
+    heatmap_opacity: f32,
 }
 
 impl FootprintPanel {
@@ -232,6 +237,11 @@ impl FootprintPanel {
             // LOB Heatmap data
             depth_snapshots: HashMap::new(),
             max_depth_snapshots: 100,  // Keep last 100 snapshots per symbol
+
+            // LOB Heatmap rendering settings
+            enable_heatmap: true,
+            heatmap_color_scheme: HeatmapColorScheme::default(),
+            heatmap_opacity: 0.6,
         }
     }
 
@@ -316,6 +326,11 @@ impl FootprintPanel {
             // LOB Heatmap data
             depth_snapshots: HashMap::new(),
             max_depth_snapshots: 100,  // Keep last 100 snapshots per symbol
+
+            // LOB Heatmap rendering settings
+            enable_heatmap: true,
+            heatmap_color_scheme: HeatmapColorScheme::default(),
+            heatmap_opacity: 0.6,
         }
     }
 
@@ -589,6 +604,17 @@ impl FootprintPanel {
                 ui.checkbox(&mut self.show_volume, "Volume");
                 ui.checkbox(&mut self.show_delta, "Delta");
                 ui.checkbox(&mut self.show_imbalance, "Imbalance");
+
+                ui.separator();
+
+                // LOB Heatmap controls
+                ui.checkbox(&mut self.enable_heatmap, "Heatmap");
+                if self.enable_heatmap {
+                    ui.label("Opacity:");
+                    ui.add(egui::Slider::new(&mut self.heatmap_opacity, 0.0..=1.0)
+                        .show_value(false)
+                        .max_decimals(2));
+                }
             });
 
             ui.separator();
@@ -706,7 +732,12 @@ impl FootprintPanel {
     fn draw_footprint_candle(&self, ui: &mut Ui, candle: &FootprintCandle, x: f32, width: f32, chart_rect: Rect, min_price: f64, max_price: f64, max_volume: u64) {
         let price_range = max_price - min_price;
 
-        // Draw OHLC outline first
+        // Draw LOB Heatmap background FIRST (if enabled)
+        if self.enable_heatmap {
+            self.draw_heatmap_for_candle(ui, candle, x, width, chart_rect, min_price, max_price);
+        }
+
+        // Draw OHLC outline
         if candle.open != 0.0 {
             let open_y = chart_rect.max.y - ((candle.open - min_price) / price_range) as f32 * chart_rect.height();
             let close_y = chart_rect.max.y - ((candle.close - min_price) / price_range) as f32 * chart_rect.height();
@@ -801,6 +832,81 @@ impl FootprintPanel {
             // Volume-based coloring
             let intensity = (volume_intensity * 255.0) as u8;
             Color32::from_rgb(intensity, intensity, intensity / 2)
+        }
+    }
+
+    fn draw_heatmap_for_candle(&self, ui: &mut Ui, candle: &FootprintCandle, x: f32, width: f32, chart_rect: Rect, min_price: f64, max_price: f64) {
+        let price_range = max_price - min_price;
+
+        // Find the nearest depth snapshot for this candle's timestamp
+        // We'll use the most recent snapshot available (depth snapshots are per-symbol)
+        let symbol = &self.selected_symbol;
+        if let Some(snapshots) = self.depth_snapshots.get(symbol) {
+            if let Some(snapshot) = snapshots.back() {
+                // Find max volume for normalization
+                let max_bid_volume = snapshot.bids.iter().map(|(_, qty)| *qty).fold(0.0f64, f64::max);
+                let max_ask_volume = snapshot.asks.iter().map(|(_, qty)| *qty).fold(0.0f64, f64::max);
+                let max_volume = max_bid_volume.max(max_ask_volume);
+
+                if max_volume > 0.0 {
+                    // Draw bid levels (green) - only within visible price range
+                    for (price, quantity) in &snapshot.bids {
+                        if *price >= min_price && *price <= max_price {
+                            let cell_y = chart_rect.max.y - ((*price - min_price) / price_range) as f32 * chart_rect.height();
+
+                            // Calculate height for this price level (proportional to tick size)
+                            let level_height = (candle.tick_size / price_range) as f32 * chart_rect.height();
+                            let level_height = level_height.max(2.0); // Minimum 2px
+
+                            let rect = Rect::from_min_size(
+                                Pos2::new(x, cell_y - level_height / 2.0),
+                                Vec2::new(width, level_height)
+                            );
+
+                            // Calculate color intensity based on volume
+                            let volume_pct = (*quantity / max_volume) as f32;
+                            let color = self.heatmap_color_scheme.get_bid_color(volume_pct);
+
+                            // Apply user-controlled opacity
+                            let color_with_opacity = Color32::from_rgba_premultiplied(
+                                color.r(),
+                                color.g(),
+                                color.b(),
+                                (color.a() as f32 * self.heatmap_opacity) as u8
+                            );
+
+                            ui.painter().rect_filled(rect, 0.0, color_with_opacity);
+                        }
+                    }
+
+                    // Draw ask levels (red) - only within visible price range
+                    for (price, quantity) in &snapshot.asks {
+                        if *price >= min_price && *price <= max_price {
+                            let cell_y = chart_rect.max.y - ((*price - min_price) / price_range) as f32 * chart_rect.height();
+
+                            let level_height = (candle.tick_size / price_range) as f32 * chart_rect.height();
+                            let level_height = level_height.max(2.0);
+
+                            let rect = Rect::from_min_size(
+                                Pos2::new(x, cell_y - level_height / 2.0),
+                                Vec2::new(width, level_height)
+                            );
+
+                            let volume_pct = (*quantity / max_volume) as f32;
+                            let color = self.heatmap_color_scheme.get_ask_color(volume_pct);
+
+                            let color_with_opacity = Color32::from_rgba_premultiplied(
+                                color.r(),
+                                color.g(),
+                                color.b(),
+                                (color.a() as f32 * self.heatmap_opacity) as u8
+                            );
+
+                            ui.painter().rect_filled(rect, 0.0, color_with_opacity);
+                        }
+                    }
+                }
+            }
         }
     }
 
