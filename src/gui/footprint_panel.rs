@@ -1,7 +1,7 @@
-use egui::{Color32, RichText, Ui, Rect, Pos2, Vec2};
+use egui::{Color32, RichText, Ui, Rect, Pos2, Vec2, Stroke};
 use std::collections::{HashMap, VecDeque, BTreeMap};
 use crate::data::{VolumeProfile, OrderflowEvent, BinanceSymbols, DepthSnapshot};
-use super::{ScreenerTheme, HeatmapColorScheme};
+use super::{ScreenerTheme, HeatmapColorScheme, DrawingToolsManager, ActiveTool, DrawingTool};
 use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone)]
@@ -160,6 +160,22 @@ pub struct FootprintPanel {
     enable_heatmap: bool,
     heatmap_color_scheme: HeatmapColorScheme,
     heatmap_opacity: f32,
+
+    // Drawing tools
+    drawing_tools: DrawingToolsManager,
+    show_drawing_toolbar: bool,
+
+    // Indicators
+    show_sma: bool,
+    sma_period: usize,
+    show_ema: bool,
+    ema_period: usize,
+    show_bollinger: bool,
+    bollinger_period: usize,
+    bollinger_std_dev: f64,
+    show_rsi: bool,
+    rsi_period: usize,
+    show_indicator_panel: bool,
 }
 
 impl FootprintPanel {
@@ -242,6 +258,22 @@ impl FootprintPanel {
             enable_heatmap: true,
             heatmap_color_scheme: HeatmapColorScheme::default(),
             heatmap_opacity: 0.6,
+
+            // Drawing tools
+            drawing_tools: DrawingToolsManager::new(),
+            show_drawing_toolbar: true,
+
+            // Indicators
+            show_sma: false,
+            sma_period: 20,
+            show_ema: false,
+            ema_period: 20,
+            show_bollinger: false,
+            bollinger_period: 20,
+            bollinger_std_dev: 2.0,
+            show_rsi: false,
+            rsi_period: 14,
+            show_indicator_panel: true,
         }
     }
 
@@ -331,6 +363,22 @@ impl FootprintPanel {
             enable_heatmap: true,
             heatmap_color_scheme: HeatmapColorScheme::default(),
             heatmap_opacity: 0.6,
+
+            // Drawing tools
+            drawing_tools: DrawingToolsManager::new(),
+            show_drawing_toolbar: true,
+
+            // Indicators
+            show_sma: false,
+            sma_period: 20,
+            show_ema: false,
+            ema_period: 20,
+            show_bollinger: false,
+            bollinger_period: 20,
+            bollinger_std_dev: 2.0,
+            show_rsi: false,
+            rsi_period: 14,
+            show_indicator_panel: true,
         }
     }
 
@@ -617,6 +665,92 @@ impl FootprintPanel {
                 }
             });
 
+            // Drawing tools toolbar
+            if self.show_drawing_toolbar {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("📐 Tools:").strong());
+
+                    let tool_button = |ui: &mut Ui, label: &str, tool: ActiveTool, active_tool: &ActiveTool| {
+                        let is_active = active_tool == &tool;
+                        let color = if is_active { Color32::from_rgb(100, 150, 255) } else { Color32::GRAY };
+                        ui.add(egui::Button::new(RichText::new(label).color(color)).small())
+                    };
+
+                    if tool_button(ui, "None", ActiveTool::None, &self.drawing_tools.active_tool).clicked() {
+                        self.drawing_tools.active_tool = ActiveTool::None;
+                    }
+                    if tool_button(ui, "📈 Trend", ActiveTool::TrendLine, &self.drawing_tools.active_tool).clicked() {
+                        self.drawing_tools.active_tool = ActiveTool::TrendLine;
+                    }
+                    if tool_button(ui, "⎯ H.Line", ActiveTool::HorizontalLine, &self.drawing_tools.active_tool).clicked() {
+                        self.drawing_tools.active_tool = ActiveTool::HorizontalLine;
+                    }
+                    if tool_button(ui, "⏐ V.Line", ActiveTool::VerticalLine, &self.drawing_tools.active_tool).clicked() {
+                        self.drawing_tools.active_tool = ActiveTool::VerticalLine;
+                    }
+                    if tool_button(ui, "📊 Fib", ActiveTool::FibonacciRetracement, &self.drawing_tools.active_tool).clicked() {
+                        self.drawing_tools.active_tool = ActiveTool::FibonacciRetracement;
+                    }
+                    if tool_button(ui, "▭ Rect", ActiveTool::Rectangle, &self.drawing_tools.active_tool).clicked() {
+                        self.drawing_tools.active_tool = ActiveTool::Rectangle;
+                    }
+                    if tool_button(ui, "T Text", ActiveTool::Text, &self.drawing_tools.active_tool).clicked() {
+                        self.drawing_tools.active_tool = ActiveTool::Text;
+                    }
+
+                    ui.separator();
+
+                    if ui.button("🗑 Delete").clicked() {
+                        self.drawing_tools.delete_selected();
+                    }
+
+                    if ui.button("🧹 Clear All").clicked() {
+                        self.drawing_tools.tools.clear();
+                    }
+
+                    ui.label(format!("Tools: {}", self.drawing_tools.tools.len()));
+                });
+            }
+
+            // Indicators panel
+            if self.show_indicator_panel {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("📊 Indicators:").strong());
+
+                    ui.checkbox(&mut self.show_sma, "SMA");
+                    if self.show_sma {
+                        ui.label("Period:");
+                        ui.add(egui::DragValue::new(&mut self.sma_period).speed(1).clamp_range(1..=200));
+                    }
+
+                    ui.separator();
+
+                    ui.checkbox(&mut self.show_ema, "EMA");
+                    if self.show_ema {
+                        ui.label("Period:");
+                        ui.add(egui::DragValue::new(&mut self.ema_period).speed(1).clamp_range(1..=200));
+                    }
+
+                    ui.separator();
+
+                    ui.checkbox(&mut self.show_bollinger, "BB");
+                    if self.show_bollinger {
+                        ui.label("Period:");
+                        ui.add(egui::DragValue::new(&mut self.bollinger_period).speed(1).clamp_range(1..=200));
+                        ui.label("StdDev:");
+                        ui.add(egui::DragValue::new(&mut self.bollinger_std_dev).speed(0.1).clamp_range(0.1..=5.0));
+                    }
+
+                    ui.separator();
+
+                    ui.checkbox(&mut self.show_rsi, "RSI");
+                    if self.show_rsi {
+                        ui.label("Period:");
+                        ui.add(egui::DragValue::new(&mut self.rsi_period).speed(1).clamp_range(1..=100));
+                    }
+                });
+            }
+
             ui.separator();
 
             // Footprint chart
@@ -708,6 +842,9 @@ impl FootprintPanel {
                 self.draw_footprint_candle(ui, candle, x, candle_width, chart_rect, overall_min_price, overall_max_price, max_volume);
             }
         }
+
+        // Draw drawing tools on top of candles
+        self.draw_drawing_tools(ui, chart_rect, &all_candles, candle_width, overall_min_price, overall_max_price);
     }
 
     fn calculate_overall_price_range(&self, candles: &[FootprintCandle]) -> (f64, f64) {
@@ -1083,7 +1220,46 @@ impl FootprintPanel {
                 self.pan_x = 0.0;
                 self.pan_y = 0.0;
             }
+
+            // Delete key to delete selected tool
+            if i.key_pressed(egui::Key::Delete) {
+                self.drawing_tools.delete_selected();
+            }
+
+            // Escape key to cancel drawing
+            if i.key_pressed(egui::Key::Escape) {
+                self.drawing_tools.cancel_drawing();
+            }
         });
+
+        // Handle drawing tool interactions (only with left-click when not panning)
+        if self.drawing_tools.active_tool != ActiveTool::None && !self.right_dragging {
+            if response.clicked() {
+                // Click to start or place tool
+                if let Some(mouse_pos) = response.interact_pointer_pos() {
+                    // Convert screen position to chart time/price
+                    // Note: This is simplified - in a real implementation you'd need proper coordinate conversion
+                    // For now, we'll use placeholder values
+                    let time = chrono::Utc::now().timestamp_millis() as u64;
+                    let price = 50000.0; // Placeholder
+
+                    if self.drawing_tools.drawing_in_progress.is_none() {
+                        // Start new drawing
+                        self.drawing_tools.start_drawing(self.drawing_tools.active_tool, time, price);
+                    } else {
+                        // Finish current drawing
+                        self.drawing_tools.finish_drawing();
+                    }
+                }
+            } else if response.dragged() && self.drawing_tools.drawing_in_progress.is_some() {
+                // Update drawing in progress
+                if let Some(mouse_pos) = response.interact_pointer_pos() {
+                    let time = chrono::Utc::now().timestamp_millis() as u64;
+                    let price = 50000.0; // Placeholder
+                    self.drawing_tools.update_drawing(time, price);
+                }
+            }
+        }
     }
 
     fn draw_candle_statistics(&mut self, ui: &mut Ui, candles: &[FootprintCandle], start_pos: Pos2, width: f32, height: f32, pan_x: f32, candle_width: f32) {
@@ -1297,6 +1473,204 @@ impl FootprintPanel {
         // Update selected symbol if it's not in the new list
         if !self.symbols.contains(&self.selected_symbol) {
             self.selected_symbol = self.symbols.first().unwrap_or(&"BTCUSDT".to_string()).clone();
+        }
+    }
+
+    fn draw_drawing_tools(
+        &self,
+        ui: &mut Ui,
+        chart_rect: Rect,
+        _candles: &[FootprintCandle],
+        _candle_width: f32,
+        min_price: f64,
+        max_price: f64,
+    ) {
+        let painter = ui.painter();
+        let price_range = max_price - min_price;
+        if price_range <= 0.0 {
+            return;
+        }
+
+        // Helper to convert price to Y coordinate
+        let price_to_y = |price: f64| -> f32 {
+            let normalized = (max_price - price) / price_range;
+            chart_rect.min.y + (normalized as f32 * chart_rect.height())
+        };
+
+        // Helper to convert time to X coordinate (simplified - would need proper implementation)
+        let _time_to_x = |_time: u64| -> f32 {
+            chart_rect.min.x + chart_rect.width() * 0.5
+        };
+
+        // Draw all completed tools
+        for tool in &self.drawing_tools.tools {
+            match tool {
+                DrawingTool::HorizontalLine(line) => {
+                    let y = price_to_y(line.price);
+                    let color = Color32::from_rgba_premultiplied(
+                        line.color[0],
+                        line.color[1],
+                        line.color[2],
+                        line.color[3],
+                    );
+                    painter.line_segment(
+                        [Pos2::new(chart_rect.min.x, y), Pos2::new(chart_rect.max.x, y)],
+                        Stroke::new(line.width, color),
+                    );
+                    // Draw price label
+                    painter.text(
+                        Pos2::new(chart_rect.max.x + 5.0, y),
+                        egui::Align2::LEFT_CENTER,
+                        format!("{:.2}", line.price),
+                        egui::FontId::proportional(11.0),
+                        color,
+                    );
+                }
+                DrawingTool::VerticalLine(line) => {
+                    // Simplified - would need proper time to X conversion
+                    let x = chart_rect.min.x + chart_rect.width() * 0.5;
+                    let color = Color32::from_rgba_premultiplied(
+                        line.color[0],
+                        line.color[1],
+                        line.color[2],
+                        line.color[3],
+                    );
+                    painter.line_segment(
+                        [Pos2::new(x, chart_rect.min.y), Pos2::new(x, chart_rect.max.y)],
+                        Stroke::new(line.width, color),
+                    );
+                }
+                DrawingTool::TrendLine(line) => {
+                    let y1 = price_to_y(line.start_price);
+                    let y2 = price_to_y(line.end_price);
+                    let x1 = chart_rect.min.x + chart_rect.width() * 0.3; // Simplified
+                    let x2 = chart_rect.min.x + chart_rect.width() * 0.7; // Simplified
+                    let color = Color32::from_rgba_premultiplied(
+                        line.color[0],
+                        line.color[1],
+                        line.color[2],
+                        line.color[3],
+                    );
+                    painter.line_segment([Pos2::new(x1, y1), Pos2::new(x2, y2)], Stroke::new(line.width, color));
+                }
+                DrawingTool::FibonacciRetracement(fib) => {
+                    let y1 = price_to_y(fib.start_price);
+                    let y2 = price_to_y(fib.end_price);
+                    let color = Color32::from_rgba_premultiplied(
+                        fib.color[0],
+                        fib.color[1],
+                        fib.color[2],
+                        fib.color[3],
+                    );
+
+                    // Draw Fibonacci levels
+                    for &level in &fib.levels {
+                        let price = fib.start_price + (fib.end_price - fib.start_price) * level as f64;
+                        let y = price_to_y(price);
+                        painter.line_segment(
+                            [Pos2::new(chart_rect.min.x, y), Pos2::new(chart_rect.max.x, y)],
+                            Stroke::new(1.0, color),
+                        );
+                        if fib.show_labels {
+                            painter.text(
+                                Pos2::new(chart_rect.max.x + 5.0, y),
+                                egui::Align2::LEFT_CENTER,
+                                format!("{:.1}% ({:.2})", level * 100.0, price),
+                                egui::FontId::proportional(10.0),
+                                color,
+                            );
+                        }
+                    }
+                }
+                DrawingTool::Rectangle(rect) => {
+                    let y1 = price_to_y(rect.start_price);
+                    let y2 = price_to_y(rect.end_price);
+                    let x1 = chart_rect.min.x + chart_rect.width() * 0.3; // Simplified
+                    let x2 = chart_rect.min.x + chart_rect.width() * 0.7; // Simplified
+
+                    let rect_shape = Rect::from_min_max(Pos2::new(x1, y1.min(y2)), Pos2::new(x2, y1.max(y2)));
+
+                    let fill_color = Color32::from_rgba_premultiplied(
+                        rect.fill_color[0],
+                        rect.fill_color[1],
+                        rect.fill_color[2],
+                        rect.fill_color[3],
+                    );
+                    let border_color = Color32::from_rgba_premultiplied(
+                        rect.border_color[0],
+                        rect.border_color[1],
+                        rect.border_color[2],
+                        rect.border_color[3],
+                    );
+
+                    painter.rect_filled(rect_shape, 0.0, fill_color);
+                    painter.rect_stroke(rect_shape, 0.0, Stroke::new(rect.border_width, border_color));
+                }
+                DrawingTool::Text(text) => {
+                    let y = price_to_y(text.price);
+                    let x = chart_rect.min.x + chart_rect.width() * 0.5; // Simplified
+                    let color = Color32::from_rgba_premultiplied(
+                        text.color[0],
+                        text.color[1],
+                        text.color[2],
+                        text.color[3],
+                    );
+
+                    if text.background {
+                        let galley = painter.layout_no_wrap(
+                            text.text.clone(),
+                            egui::FontId::proportional(text.font_size),
+                            color,
+                        );
+                        let text_rect = Rect::from_min_size(
+                            Pos2::new(x - galley.size().x / 2.0, y - galley.size().y / 2.0),
+                            galley.size(),
+                        );
+                        painter.rect_filled(text_rect.expand(2.0), 2.0, Color32::from_black_alpha(180));
+                    }
+
+                    painter.text(
+                        Pos2::new(x, y),
+                        egui::Align2::CENTER_CENTER,
+                        &text.text,
+                        egui::FontId::proportional(text.font_size),
+                        color,
+                    );
+                }
+            }
+        }
+
+        // Draw tool in progress
+        if let Some(tool) = &self.drawing_tools.drawing_in_progress {
+            match tool {
+                DrawingTool::HorizontalLine(line) => {
+                    let y = price_to_y(line.price);
+                    let color = Color32::from_rgba_premultiplied(
+                        line.color[0],
+                        line.color[1],
+                        line.color[2],
+                        150, // Semi-transparent while drawing
+                    );
+                    painter.line_segment(
+                        [Pos2::new(chart_rect.min.x, y), Pos2::new(chart_rect.max.x, y)],
+                        Stroke::new(line.width, color),
+                    );
+                }
+                DrawingTool::TrendLine(line) => {
+                    let y1 = price_to_y(line.start_price);
+                    let y2 = price_to_y(line.end_price);
+                    let x1 = chart_rect.min.x + chart_rect.width() * 0.3;
+                    let x2 = chart_rect.min.x + chart_rect.width() * 0.7;
+                    let color = Color32::from_rgba_premultiplied(
+                        line.color[0],
+                        line.color[1],
+                        line.color[2],
+                        150,
+                    );
+                    painter.line_segment([Pos2::new(x1, y1), Pos2::new(x2, y2)], Stroke::new(line.width, color));
+                }
+                _ => {}
+            }
         }
     }
 }
