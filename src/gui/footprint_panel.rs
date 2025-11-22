@@ -165,6 +165,13 @@ pub struct FootprintPanel {
     drawing_tools: DrawingToolsManager,
     show_drawing_toolbar: bool,
 
+    // Chart state cache for coordinate conversion
+    cached_chart_rect: Option<Rect>,
+    cached_candles: Vec<FootprintCandle>,
+    cached_candle_width: f32,
+    cached_min_price: f64,
+    cached_max_price: f64,
+
     // Indicators
     show_sma: bool,
     sma_period: usize,
@@ -262,6 +269,13 @@ impl FootprintPanel {
             // Drawing tools
             drawing_tools: DrawingToolsManager::new(),
             show_drawing_toolbar: true,
+
+            // Chart state cache
+            cached_chart_rect: None,
+            cached_candles: Vec::new(),
+            cached_candle_width: 0.0,
+            cached_min_price: 0.0,
+            cached_max_price: 0.0,
 
             // Indicators
             show_sma: false,
@@ -367,6 +381,13 @@ impl FootprintPanel {
             // Drawing tools
             drawing_tools: DrawingToolsManager::new(),
             show_drawing_toolbar: true,
+
+            // Chart state cache
+            cached_chart_rect: None,
+            cached_candles: Vec::new(),
+            cached_candle_width: 0.0,
+            cached_min_price: 0.0,
+            cached_max_price: 0.0,
 
             // Indicators
             show_sma: false,
@@ -822,6 +843,13 @@ impl FootprintPanel {
         let overall_min_price = base_min_price + pan_price_offset;
         let overall_max_price = overall_min_price + zoomed_price_range;
 
+        // Cache chart state for coordinate conversion in drawing tools
+        self.cached_chart_rect = Some(chart_rect);
+        self.cached_candles = all_candles.clone();
+        self.cached_candle_width = candle_width;
+        self.cached_min_price = overall_min_price;
+        self.cached_max_price = overall_max_price;
+
         // Get max volume for rendering
         let max_volume = all_candles.iter().map(|c| c.max_volume()).max().unwrap_or(1);
 
@@ -1047,6 +1075,79 @@ impl FootprintPanel {
         }
     }
 
+    // Coordinate conversion helper methods
+    fn screen_to_price(&self, screen_y: f32) -> Option<f64> {
+        let chart_rect = self.cached_chart_rect?;
+        let price_range = self.cached_max_price - self.cached_min_price;
+        if price_range <= 0.0 {
+            return None;
+        }
+
+        // Y coordinate is inverted (top = max price, bottom = min price)
+        let normalized = (screen_y - chart_rect.min.y) / chart_rect.height();
+        let price = self.cached_max_price - (normalized as f64 * price_range);
+        Some(price)
+    }
+
+    fn screen_to_time(&self, screen_x: f32) -> Option<u64> {
+        let chart_rect = self.cached_chart_rect?;
+        if self.cached_candles.is_empty() || self.cached_candle_width <= 0.0 {
+            return None;
+        }
+
+        // Calculate which candle index this X coordinate corresponds to
+        let relative_x = screen_x - chart_rect.min.x - self.pan_x;
+        let candle_index = (relative_x / self.cached_candle_width).floor() as i32;
+
+        // Clamp to valid range
+        if candle_index < 0 || candle_index >= self.cached_candles.len() as i32 {
+            // Return the closest boundary timestamp
+            if candle_index < 0 {
+                return Some(self.cached_candles.first()?.timestamp);
+            } else {
+                return Some(self.cached_candles.last()?.timestamp);
+            }
+        }
+
+        Some(self.cached_candles[candle_index as usize].timestamp)
+    }
+
+    fn price_to_screen(&self, price: f64) -> Option<f32> {
+        let chart_rect = self.cached_chart_rect?;
+        let price_range = self.cached_max_price - self.cached_min_price;
+        if price_range <= 0.0 {
+            return None;
+        }
+
+        let normalized = (self.cached_max_price - price) / price_range;
+        let screen_y = chart_rect.min.y + (normalized as f32 * chart_rect.height());
+        Some(screen_y)
+    }
+
+    fn time_to_screen(&self, timestamp: u64) -> Option<f32> {
+        let chart_rect = self.cached_chart_rect?;
+        if self.cached_candles.is_empty() || self.cached_candle_width <= 0.0 {
+            return None;
+        }
+
+        // Find the candle with this timestamp or the closest one
+        let index = self.cached_candles
+            .iter()
+            .position(|c| c.timestamp == timestamp)
+            .unwrap_or_else(|| {
+                // Find closest candle
+                self.cached_candles
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, c)| (c.timestamp as i64 - timestamp as i64).abs())
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            });
+
+        let screen_x = chart_rect.min.x + (index as f32 * self.cached_candle_width) + self.pan_x;
+        Some(screen_x)
+    }
+
     fn handle_mouse_interactions(&mut self, ui: &mut Ui, chart_rect: Rect) {
         let response = ui.allocate_rect(chart_rect, egui::Sense::click_and_drag());
 
@@ -1237,26 +1338,29 @@ impl FootprintPanel {
             if response.clicked() {
                 // Click to start or place tool
                 if let Some(mouse_pos) = response.interact_pointer_pos() {
-                    // Convert screen position to chart time/price
-                    // Note: This is simplified - in a real implementation you'd need proper coordinate conversion
-                    // For now, we'll use placeholder values
-                    let time = chrono::Utc::now().timestamp_millis() as u64;
-                    let price = 50000.0; // Placeholder
-
-                    if self.drawing_tools.drawing_in_progress.is_none() {
-                        // Start new drawing
-                        self.drawing_tools.start_drawing(self.drawing_tools.active_tool, time, price);
-                    } else {
-                        // Finish current drawing
-                        self.drawing_tools.finish_drawing();
+                    // Convert screen position to chart time/price using proper coordinate conversion
+                    if let (Some(time), Some(price)) = (
+                        self.screen_to_time(mouse_pos.x),
+                        self.screen_to_price(mouse_pos.y)
+                    ) {
+                        if self.drawing_tools.drawing_in_progress.is_none() {
+                            // Start new drawing
+                            self.drawing_tools.start_drawing(self.drawing_tools.active_tool, time, price);
+                        } else {
+                            // Finish current drawing
+                            self.drawing_tools.finish_drawing();
+                        }
                     }
                 }
             } else if response.dragged() && self.drawing_tools.drawing_in_progress.is_some() {
                 // Update drawing in progress
                 if let Some(mouse_pos) = response.interact_pointer_pos() {
-                    let time = chrono::Utc::now().timestamp_millis() as u64;
-                    let price = 50000.0; // Placeholder
-                    self.drawing_tools.update_drawing(time, price);
+                    if let (Some(time), Some(price)) = (
+                        self.screen_to_time(mouse_pos.x),
+                        self.screen_to_price(mouse_pos.y)
+                    ) {
+                        self.drawing_tools.update_drawing(time, price);
+                    }
                 }
             }
         }
@@ -1491,71 +1595,64 @@ impl FootprintPanel {
             return;
         }
 
-        // Helper to convert price to Y coordinate
-        let price_to_y = |price: f64| -> f32 {
-            let normalized = (max_price - price) / price_range;
-            chart_rect.min.y + (normalized as f32 * chart_rect.height())
-        };
-
-        // Helper to convert time to X coordinate (simplified - would need proper implementation)
-        let _time_to_x = |_time: u64| -> f32 {
-            chart_rect.min.x + chart_rect.width() * 0.5
-        };
+        // Use proper coordinate conversion methods
 
         // Draw all completed tools
         for tool in &self.drawing_tools.tools {
             match tool {
                 DrawingTool::HorizontalLine(line) => {
-                    let y = price_to_y(line.price);
-                    let color = Color32::from_rgba_premultiplied(
-                        line.color[0],
-                        line.color[1],
-                        line.color[2],
-                        line.color[3],
-                    );
-                    painter.line_segment(
-                        [Pos2::new(chart_rect.min.x, y), Pos2::new(chart_rect.max.x, y)],
-                        Stroke::new(line.width, color),
-                    );
-                    // Draw price label
-                    painter.text(
-                        Pos2::new(chart_rect.max.x + 5.0, y),
-                        egui::Align2::LEFT_CENTER,
-                        format!("{:.2}", line.price),
-                        egui::FontId::proportional(11.0),
-                        color,
-                    );
+                    if let Some(y) = self.price_to_screen(line.price) {
+                        let color = Color32::from_rgba_premultiplied(
+                            line.color[0],
+                            line.color[1],
+                            line.color[2],
+                            line.color[3],
+                        );
+                        painter.line_segment(
+                            [Pos2::new(chart_rect.min.x, y), Pos2::new(chart_rect.max.x, y)],
+                            Stroke::new(line.width, color),
+                        );
+                        // Draw price label
+                        painter.text(
+                            Pos2::new(chart_rect.max.x + 5.0, y),
+                            egui::Align2::LEFT_CENTER,
+                            format!("{:.2}", line.price),
+                            egui::FontId::proportional(11.0),
+                            color,
+                        );
+                    }
                 }
                 DrawingTool::VerticalLine(line) => {
-                    // Simplified - would need proper time to X conversion
-                    let x = chart_rect.min.x + chart_rect.width() * 0.5;
-                    let color = Color32::from_rgba_premultiplied(
-                        line.color[0],
-                        line.color[1],
-                        line.color[2],
-                        line.color[3],
-                    );
-                    painter.line_segment(
-                        [Pos2::new(x, chart_rect.min.y), Pos2::new(x, chart_rect.max.y)],
-                        Stroke::new(line.width, color),
-                    );
+                    if let Some(x) = self.time_to_screen(line.time) {
+                        let color = Color32::from_rgba_premultiplied(
+                            line.color[0],
+                            line.color[1],
+                            line.color[2],
+                            line.color[3],
+                        );
+                        painter.line_segment(
+                            [Pos2::new(x, chart_rect.min.y), Pos2::new(x, chart_rect.max.y)],
+                            Stroke::new(line.width, color),
+                        );
+                    }
                 }
                 DrawingTool::TrendLine(line) => {
-                    let y1 = price_to_y(line.start_price);
-                    let y2 = price_to_y(line.end_price);
-                    let x1 = chart_rect.min.x + chart_rect.width() * 0.3; // Simplified
-                    let x2 = chart_rect.min.x + chart_rect.width() * 0.7; // Simplified
-                    let color = Color32::from_rgba_premultiplied(
-                        line.color[0],
-                        line.color[1],
-                        line.color[2],
-                        line.color[3],
-                    );
-                    painter.line_segment([Pos2::new(x1, y1), Pos2::new(x2, y2)], Stroke::new(line.width, color));
+                    if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (
+                        self.time_to_screen(line.start_time),
+                        self.price_to_screen(line.start_price),
+                        self.time_to_screen(line.end_time),
+                        self.price_to_screen(line.end_price),
+                    ) {
+                        let color = Color32::from_rgba_premultiplied(
+                            line.color[0],
+                            line.color[1],
+                            line.color[2],
+                            line.color[3],
+                        );
+                        painter.line_segment([Pos2::new(x1, y1), Pos2::new(x2, y2)], Stroke::new(line.width, color));
+                    }
                 }
                 DrawingTool::FibonacciRetracement(fib) => {
-                    let y1 = price_to_y(fib.start_price);
-                    let y2 = price_to_y(fib.end_price);
                     let color = Color32::from_rgba_premultiplied(
                         fib.color[0],
                         fib.color[1],
@@ -1566,108 +1663,118 @@ impl FootprintPanel {
                     // Draw Fibonacci levels
                     for &level in &fib.levels {
                         let price = fib.start_price + (fib.end_price - fib.start_price) * level as f64;
-                        let y = price_to_y(price);
-                        painter.line_segment(
-                            [Pos2::new(chart_rect.min.x, y), Pos2::new(chart_rect.max.x, y)],
-                            Stroke::new(1.0, color),
-                        );
-                        if fib.show_labels {
-                            painter.text(
-                                Pos2::new(chart_rect.max.x + 5.0, y),
-                                egui::Align2::LEFT_CENTER,
-                                format!("{:.1}% ({:.2})", level * 100.0, price),
-                                egui::FontId::proportional(10.0),
-                                color,
+                        if let Some(y) = self.price_to_screen(price) {
+                            painter.line_segment(
+                                [Pos2::new(chart_rect.min.x, y), Pos2::new(chart_rect.max.x, y)],
+                                Stroke::new(1.0, color),
                             );
+                            if fib.show_labels {
+                                painter.text(
+                                    Pos2::new(chart_rect.max.x + 5.0, y),
+                                    egui::Align2::LEFT_CENTER,
+                                    format!("{:.1}% ({:.2})", level * 100.0, price),
+                                    egui::FontId::proportional(10.0),
+                                    color,
+                                );
+                            }
                         }
                     }
                 }
                 DrawingTool::Rectangle(rect) => {
-                    let y1 = price_to_y(rect.start_price);
-                    let y2 = price_to_y(rect.end_price);
-                    let x1 = chart_rect.min.x + chart_rect.width() * 0.3; // Simplified
-                    let x2 = chart_rect.min.x + chart_rect.width() * 0.7; // Simplified
+                    if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (
+                        self.time_to_screen(rect.start_time),
+                        self.price_to_screen(rect.start_price),
+                        self.time_to_screen(rect.end_time),
+                        self.price_to_screen(rect.end_price),
+                    ) {
+                        let rect_shape = Rect::from_min_max(Pos2::new(x1, y1.min(y2)), Pos2::new(x2, y1.max(y2)));
 
-                    let rect_shape = Rect::from_min_max(Pos2::new(x1, y1.min(y2)), Pos2::new(x2, y1.max(y2)));
+                        let fill_color = Color32::from_rgba_premultiplied(
+                            rect.fill_color[0],
+                            rect.fill_color[1],
+                            rect.fill_color[2],
+                            rect.fill_color[3],
+                        );
+                        let border_color = Color32::from_rgba_premultiplied(
+                            rect.border_color[0],
+                            rect.border_color[1],
+                            rect.border_color[2],
+                            rect.border_color[3],
+                        );
 
-                    let fill_color = Color32::from_rgba_premultiplied(
-                        rect.fill_color[0],
-                        rect.fill_color[1],
-                        rect.fill_color[2],
-                        rect.fill_color[3],
-                    );
-                    let border_color = Color32::from_rgba_premultiplied(
-                        rect.border_color[0],
-                        rect.border_color[1],
-                        rect.border_color[2],
-                        rect.border_color[3],
-                    );
-
-                    painter.rect_filled(rect_shape, 0.0, fill_color);
-                    painter.rect_stroke(rect_shape, 0.0, Stroke::new(rect.border_width, border_color));
+                        painter.rect_filled(rect_shape, 0.0, fill_color);
+                        painter.rect_stroke(rect_shape, 0.0, Stroke::new(rect.border_width, border_color));
+                    }
                 }
                 DrawingTool::Text(text) => {
-                    let y = price_to_y(text.price);
-                    let x = chart_rect.min.x + chart_rect.width() * 0.5; // Simplified
-                    let color = Color32::from_rgba_premultiplied(
-                        text.color[0],
-                        text.color[1],
-                        text.color[2],
-                        text.color[3],
-                    );
+                    if let (Some(x), Some(y)) = (
+                        self.time_to_screen(text.time),
+                        self.price_to_screen(text.price),
+                    ) {
+                        let color = Color32::from_rgba_premultiplied(
+                            text.color[0],
+                            text.color[1],
+                            text.color[2],
+                            text.color[3],
+                        );
 
-                    if text.background {
-                        let galley = painter.layout_no_wrap(
-                            text.text.clone(),
+                        if text.background {
+                            let galley = painter.layout_no_wrap(
+                                text.text.clone(),
+                                egui::FontId::proportional(text.font_size),
+                                color,
+                            );
+                            let text_rect = Rect::from_min_size(
+                                Pos2::new(x - galley.size().x / 2.0, y - galley.size().y / 2.0),
+                                galley.size(),
+                            );
+                            painter.rect_filled(text_rect.expand(2.0), 2.0, Color32::from_black_alpha(180));
+                        }
+
+                        painter.text(
+                            Pos2::new(x, y),
+                            egui::Align2::CENTER_CENTER,
+                            &text.text,
                             egui::FontId::proportional(text.font_size),
                             color,
                         );
-                        let text_rect = Rect::from_min_size(
-                            Pos2::new(x - galley.size().x / 2.0, y - galley.size().y / 2.0),
-                            galley.size(),
-                        );
-                        painter.rect_filled(text_rect.expand(2.0), 2.0, Color32::from_black_alpha(180));
                     }
-
-                    painter.text(
-                        Pos2::new(x, y),
-                        egui::Align2::CENTER_CENTER,
-                        &text.text,
-                        egui::FontId::proportional(text.font_size),
-                        color,
-                    );
                 }
             }
         }
 
-        // Draw tool in progress
+        // Draw tool in progress (with semi-transparency)
         if let Some(tool) = &self.drawing_tools.drawing_in_progress {
             match tool {
                 DrawingTool::HorizontalLine(line) => {
-                    let y = price_to_y(line.price);
-                    let color = Color32::from_rgba_premultiplied(
-                        line.color[0],
-                        line.color[1],
-                        line.color[2],
-                        150, // Semi-transparent while drawing
-                    );
-                    painter.line_segment(
-                        [Pos2::new(chart_rect.min.x, y), Pos2::new(chart_rect.max.x, y)],
-                        Stroke::new(line.width, color),
-                    );
+                    if let Some(y) = self.price_to_screen(line.price) {
+                        let color = Color32::from_rgba_premultiplied(
+                            line.color[0],
+                            line.color[1],
+                            line.color[2],
+                            150, // Semi-transparent while drawing
+                        );
+                        painter.line_segment(
+                            [Pos2::new(chart_rect.min.x, y), Pos2::new(chart_rect.max.x, y)],
+                            Stroke::new(line.width, color),
+                        );
+                    }
                 }
                 DrawingTool::TrendLine(line) => {
-                    let y1 = price_to_y(line.start_price);
-                    let y2 = price_to_y(line.end_price);
-                    let x1 = chart_rect.min.x + chart_rect.width() * 0.3;
-                    let x2 = chart_rect.min.x + chart_rect.width() * 0.7;
-                    let color = Color32::from_rgba_premultiplied(
-                        line.color[0],
-                        line.color[1],
-                        line.color[2],
-                        150,
-                    );
-                    painter.line_segment([Pos2::new(x1, y1), Pos2::new(x2, y2)], Stroke::new(line.width, color));
+                    if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (
+                        self.time_to_screen(line.start_time),
+                        self.price_to_screen(line.start_price),
+                        self.time_to_screen(line.end_time),
+                        self.price_to_screen(line.end_price),
+                    ) {
+                        let color = Color32::from_rgba_premultiplied(
+                            line.color[0],
+                            line.color[1],
+                            line.color[2],
+                            150,
+                        );
+                        painter.line_segment([Pos2::new(x1, y1), Pos2::new(x2, y2)], Stroke::new(line.width, color));
+                    }
                 }
                 _ => {}
             }
