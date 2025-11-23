@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use anyhow::Result;
 
-use crate::data::{OrderImbalance, LiquidationEvent, VolumeProfile, GuiUpdate, DatabaseManager, BigOrderflowAlert, OrderflowEvent, BinanceSymbols};
+use crate::data::{OrderImbalance, LiquidationEvent, VolumeProfile, GuiUpdate, DatabaseManager, BigOrderflowAlert, OrderflowEvent, BinanceSymbols, DepthSnapshot};
 use crate::analysis::volume_analysis::VolumeAnalyzer;
-use super::{ScreenerTheme, ScreenerPanel, ImbalancePanel, FootprintPanel, LiquidationPanel};
+use super::{ScreenerTheme, ScreenerPanel, ImbalancePanel, FootprintPanel, LiquidationPanel, DOMPanel};
 
 #[derive(Debug, PartialEq)]
 enum ActivePanel {
@@ -14,6 +14,7 @@ enum ActivePanel {
     Imbalance,
     Footprint,
     Liquidation,
+    DOM,
 }
 
 pub struct ScreenerApp {
@@ -22,7 +23,8 @@ pub struct ScreenerApp {
     imbalance_panel: ImbalancePanel,
     footprint_panel: FootprintPanel,
     liquidation_panel: LiquidationPanel,
-    
+    dom_panel: DOMPanel,
+
     // State
     active_panel: ActivePanel,
     
@@ -32,6 +34,7 @@ pub struct ScreenerApp {
     volume_receiver: Option<mpsc::Receiver<VolumeProfile>>,
     gui_update_receiver: Option<mpsc::Receiver<GuiUpdate>>,
     orderflow_receiver: Option<mpsc::Receiver<OrderflowEvent>>,
+    depth_snapshot_receiver: Option<mpsc::Receiver<(String, DepthSnapshot)>>,
     
     // Database
     database: Arc<DatabaseManager>,
@@ -81,6 +84,7 @@ impl ScreenerApp {
         volume_receiver: mpsc::Receiver<VolumeProfile>,
         gui_update_receiver: mpsc::Receiver<GuiUpdate>,
         orderflow_receiver: mpsc::Receiver<OrderflowEvent>,
+        depth_snapshot_receiver: mpsc::Receiver<(String, DepthSnapshot)>,
         database: Arc<DatabaseManager>,
         subscribed_symbols: Vec<String>,
     ) -> Result<Self> {
@@ -104,12 +108,14 @@ impl ScreenerApp {
             imbalance_panel: ImbalancePanel::new(),
             footprint_panel: FootprintPanel::new_with_symbols(symbols.clone()),
             liquidation_panel: LiquidationPanel::new(),
+            dom_panel: DOMPanel::new(symbols.first().unwrap_or(&"BTCUSDT".to_string()).clone()),
             active_panel: ActivePanel::Screener,
             imbalance_receiver: Some(imbalance_receiver),
             liquidation_receiver: Some(liquidation_receiver),
             volume_receiver: Some(volume_receiver_new), // Use new receiver from volume analyzer
             gui_update_receiver: Some(gui_update_receiver),
             orderflow_receiver: Some(orderflow_receiver),
+            depth_snapshot_receiver: Some(depth_snapshot_receiver),
             database,
             connection_status: ConnectionStatus::default(),
             last_update_time: std::time::Instant::now(),
@@ -171,15 +177,29 @@ impl ScreenerApp {
             }
         }
 
-        // Process orderflow events for real-time footprint
+        // Process orderflow events for real-time footprint and DOM
         if let Some(receiver) = &mut self.orderflow_receiver {
             let mut count = 0;
             while let Ok(orderflow_event) = receiver.try_recv() {
                 count += 1;
                 self.footprint_panel.add_orderflow_event(&orderflow_event);
+                self.dom_panel.process_trade(&orderflow_event);
             }
             if count > 0 {
-                tracing::debug!("GUI received {} orderflow events for footprint", count);
+                tracing::debug!("GUI received {} orderflow events for footprint & DOM", count);
+            }
+        }
+
+        // Process depth snapshots for LOB heatmap and DOM
+        if let Some(receiver) = &mut self.depth_snapshot_receiver {
+            let mut count = 0;
+            while let Ok((symbol, snapshot)) = receiver.try_recv() {
+                count += 1;
+                self.footprint_panel.add_depth_snapshot(symbol.clone(), snapshot.clone());
+                self.dom_panel.update_depth(snapshot);
+            }
+            if count > 0 {
+                tracing::debug!("GUI received {} depth snapshots", count);
             }
         }
 
@@ -379,6 +399,7 @@ impl ScreenerApp {
             ui.selectable_value(&mut self.active_panel, ActivePanel::Imbalance, "⚖️ Imbalance");
             ui.selectable_value(&mut self.active_panel, ActivePanel::Footprint, "📈 Footprint");
             ui.selectable_value(&mut self.active_panel, ActivePanel::Liquidation, "💥 Liquidations");
+            ui.selectable_value(&mut self.active_panel, ActivePanel::DOM, "📚 DOM");
         });
     }
 
@@ -395,6 +416,9 @@ impl ScreenerApp {
             }
             ActivePanel::Liquidation => {
                 self.liquidation_panel.show(ui);
+            }
+            ActivePanel::DOM => {
+                self.dom_panel.show(ui);
             }
         }
     }

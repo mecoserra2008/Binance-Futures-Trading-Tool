@@ -24,6 +24,7 @@ futures-util = "0.3"
 plotters = "0.3"
 plotters-canvas = "0.3"
 winapi = { version = "0.3", features = ["winuser"] }
+dirs = "5.0"
 
 [profile.release]
 lto = true
